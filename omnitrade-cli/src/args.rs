@@ -40,6 +40,10 @@ pub enum Commands {
         /// Slippage in basis points.
         #[arg(long, value_name = "BPS", default_value_t = 5.0)]
         slippage_bps: f64,
+
+        /// Order quantity per signal (default 1.0).
+        #[arg(long, value_name = "AMOUNT", default_value_t = 1.0)]
+        quantity: f64,
     },
     /// Validate a strategy script for syntax and structural correctness.
     Validate {
@@ -103,6 +107,8 @@ mod tests {
             "0.002",
             "--slippage-bps",
             "10.0",
+            "--quantity",
+            "0.05",
         ];
 
         // Act
@@ -116,6 +122,7 @@ mod tests {
             initial_balance,
             fee_rate,
             slippage_bps,
+            quantity,
         } = parsed.command
         {
             assert_eq!(script, PathBuf::from("/path/to/script.omni"));
@@ -123,6 +130,7 @@ mod tests {
             assert!((initial_balance - 5000.0).abs() < f64::EPSILON);
             assert!((fee_rate - 0.002).abs() < f64::EPSILON);
             assert!((slippage_bps - 10.0).abs() < f64::EPSILON);
+            assert!((quantity - 0.05).abs() < f64::EPSILON);
         } else {
             unreachable!("Expected Commands::Backtest variant");
         }
@@ -151,6 +159,7 @@ mod tests {
             initial_balance,
             fee_rate,
             slippage_bps,
+            quantity,
         } = parsed.command
         {
             assert_eq!(script, PathBuf::from("script.omni"));
@@ -158,6 +167,7 @@ mod tests {
             assert!((initial_balance - 10000.0).abs() < f64::EPSILON);
             assert!((fee_rate - 0.001).abs() < f64::EPSILON);
             assert!((slippage_bps - 5.0).abs() < f64::EPSILON);
+            assert!((quantity - 1.0).abs() < f64::EPSILON);
         } else {
             unreachable!("Expected Commands::Backtest variant");
         }

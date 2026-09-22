@@ -33,8 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_balance,
             fee_rate,
             slippage_bps,
+            quantity,
         } => {
-            let config = BacktestConfig::new(script, data, initial_balance, fee_rate, slippage_bps);
+            let config = BacktestConfig::new(
+                script,
+                data,
+                initial_balance,
+                fee_rate,
+                slippage_bps,
+                quantity,
+            );
 
             let result = run_backtest(&config)?;
             println!("=== Backtest Results ===");

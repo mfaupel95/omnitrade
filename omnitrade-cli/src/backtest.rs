@@ -37,6 +37,7 @@ impl BacktestConfig {
         initial_balance: f64,
         fee_rate: f64,
         slippage_bps: f64,
+        quantity: f64,
     ) -> Self {
         Self {
             script_path,
@@ -45,7 +46,7 @@ impl BacktestConfig {
             fee_rate,
             slippage_bps,
             symbol: "BTCUSDT".to_string(),
-            quantity: 1.0,
+            quantity,
         }
     }
 }
@@ -342,6 +343,30 @@ mod tests {
     }
 
     #[test]
+    fn test_quantity_scales_pnl_linearly() {
+        // 0.5 BTC auf 100 -> 111 Long: halber PnL des 1.0-Tests (5.3945).
+        let candles = vec![
+            Candle::new(1000, 100.0, 101.0, 99.0, 100.0, 500.0),
+            Candle::new(2000, 111.0, 112.0, 110.0, 111.0, 600.0),
+        ];
+        let cfg = BacktestConfig::new(
+            PathBuf::from("dummy.omni"),
+            PathBuf::from("dummy.csv"),
+            200_000.0,
+            0.001,
+            0.0,
+            0.5,
+        );
+        let script = "if close() < 105 { buy() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        let expected = 0.5 * ((111.0 - 100.0) - (111.0 + 100.0) * 0.001);
+        assert!((result.total_pnl - expected).abs() < 1e-6);
+        assert!((result.final_balance - (cfg.initial_balance + expected)).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_close_realizes_pnl_without_phantom_leg() {
         // Closing a long must realize PnL into the balance and remove the
         // position — it must NOT leave a phantom short leg behind (the old
@@ -383,6 +408,7 @@ mod tests {
             10000.0,
             0.001,
             5.0,
+            1.0,
         );
 
         // Act
@@ -406,6 +432,7 @@ mod tests {
             10000.0,
             0.001,
             5.0,
+            1.0,
         );
 
         // Act
@@ -435,6 +462,7 @@ mod tests {
             10000.0,
             0.0,
             0.0,
+            1.0,
         );
 
         // Act
