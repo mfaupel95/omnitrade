@@ -3,9 +3,15 @@
 pub mod client;
 pub mod connection;
 pub mod dto;
+pub mod margin;
+pub mod rest;
 pub mod router;
+pub mod signing;
 
 pub use client::BinanceClient;
 pub use connection::{BinanceConnection, ConnectionState};
 pub use dto::{BinanceDepthEvent, BinanceKlineEvent, BinanceStreamWrapper};
+pub use margin::BinanceMarginClient;
+pub use rest::BinanceRestClient;
 pub use router::BinanceRouter;
+pub use signing::BinanceSigner;
