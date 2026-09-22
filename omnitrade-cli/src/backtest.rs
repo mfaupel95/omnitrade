@@ -146,6 +146,25 @@ fn close_pos(
     Ok(pnl)
 }
 
+/// Closes a position at an explicit price tag (STOP/TP/Trailing-Ausfuehrung).
+fn close_at(
+    acc: &mut AccountState,
+    sym: &str,
+    side: Side,
+    price: f64,
+    fee_rate: f64,
+    tag: &str,
+) -> Result<f64, Box<dyn Error>> {
+    let pnl = acc.close_position_at(sym, side, price, fee_rate)?;
+    if std::env::var("OMNI_TRACE").is_ok() {
+        eprintln!(
+            "TRACE close {side:?} via {tag} @{price:.2} pnl={pnl:9.2} balance={:.2}",
+            acc.balance
+        );
+    }
+    Ok(pnl)
+}
+
 /// Executes a strategy backtest against historical market candle data.
 pub fn run_backtest(cfg: &BacktestConfig) -> Result<BacktestResult, Box<dyn Error>> {
     let script_str = std::fs::read_to_string(&cfg.script_path)?;
@@ -179,6 +198,15 @@ fn run_backtest_with_script_and_candles(
         cfg.quantity
     };
 
+    let mut long_stop: Option<f64> = None;
+    let mut long_take: Option<f64> = None;
+    let mut long_trail: Option<f64> = None;
+    let mut long_trail_hi: f64 = f64::NEG_INFINITY;
+    let mut short_stop: Option<f64> = None;
+    let mut short_take: Option<f64> = None;
+    let mut short_trail: Option<f64> = None;
+    let mut short_trail_lo: f64 = f64::INFINITY;
+
     for i in 0..candles.len() {
         let c = &candles[i];
         acc.update_unrealized_pnl(sym, Side::Buy, c.close).ok();
@@ -191,8 +219,85 @@ fn run_backtest_with_script_and_candles(
             Err(e) => return Err(e.into()),
         };
 
-        let has_long = acc.get_position(sym, Side::Buy).is_some();
-        let has_short = acc.get_position(sym, Side::Sell).is_some();
+        let mut has_long = acc.get_position(sym, Side::Buy).is_some();
+        let mut has_short = acc.get_position(sym, Side::Sell).is_some();
+
+        // --- Stop-/Take-Profit/Trailing-Ausfuehrung zuerst: ein Stop gewinnt
+        // gegen ein Signal derselben Kerze. Die Niveaus stammen aus dem
+        // OrderIntent, der beim Oeffnen der Position gelesen wurde.
+        if has_long {
+            if let Some(pct) = long_trail {
+                if c.high > long_trail_hi {
+                    long_trail_hi = c.high;
+                    let ns = long_trail_hi * (1.0 - pct);
+                    if long_stop.map_or(true, |cur| ns > cur) {
+                        long_stop = Some(ns);
+                    }
+                }
+            }
+            if let Some(tp) = long_take {
+                if c.high >= tp {
+                    let pnl = close_at(&mut acc, sym, Side::Buy, tp, cfg.fee_rate, "TP")?;
+                    order_id += 1;
+                    total_trades += 1;
+                    if pnl > 0.0 {
+                        wins += 1;
+                    }
+                    (long_stop, long_take, long_trail) = (None, None, None);
+                    long_trail_hi = f64::NEG_INFINITY;
+                }
+            }
+            if let Some(sl) = long_stop {
+                if c.low <= sl {
+                    let pnl = close_at(&mut acc, sym, Side::Buy, sl, cfg.fee_rate, "STOP")?;
+                    order_id += 1;
+                    total_trades += 1;
+                    if pnl > 0.0 {
+                        wins += 1;
+                    }
+                    (long_stop, long_take, long_trail) = (None, None, None);
+                    long_trail_hi = f64::NEG_INFINITY;
+                }
+            }
+        }
+        if has_short {
+            if let Some(pct) = short_trail {
+                if c.low < short_trail_lo {
+                    short_trail_lo = c.low;
+                    let ns = short_trail_lo * (1.0 + pct);
+                    if short_stop.map_or(true, |cur| ns < cur) {
+                        short_stop = Some(ns);
+                    }
+                }
+            }
+            if let Some(tp) = short_take {
+                if c.low <= tp {
+                    let pnl = close_at(&mut acc, sym, Side::Sell, tp, cfg.fee_rate, "TP")?;
+                    order_id += 1;
+                    total_trades += 1;
+                    if pnl > 0.0 {
+                        wins += 1;
+                    }
+                    (short_stop, short_take, short_trail) = (None, None, None);
+                    short_trail_lo = f64::INFINITY;
+                }
+            }
+            if let Some(sl) = short_stop {
+                if c.high >= sl {
+                    let pnl = close_at(&mut acc, sym, Side::Sell, sl, cfg.fee_rate, "STOP")?;
+                    order_id += 1;
+                    total_trades += 1;
+                    if pnl > 0.0 {
+                        wins += 1;
+                    }
+                    (short_stop, short_take, short_trail) = (None, None, None);
+                    short_trail_lo = f64::INFINITY;
+                }
+            }
+        }
+
+        has_long = acc.get_position(sym, Side::Buy).is_some();
+        has_short = acc.get_position(sym, Side::Sell).is_some();
 
         match sig {
             Signal::Buy if has_short => {
@@ -202,9 +307,19 @@ fn run_backtest_with_script_and_candles(
                 if pnl > 0.0 {
                     wins += 1;
                 }
+                (short_stop, short_take, short_trail) = (None, None, None);
+                short_trail_lo = f64::INFINITY;
                 if !has_long {
                     execute_order(&mut acc, &mut eng, order_id, sym, Side::Buy, qty, c)?;
                     order_id += 1;
+                    let intent = eval.current_intent();
+                    long_stop = intent.stop_loss;
+                    long_take = intent.take_profit;
+                    long_trail = intent.trailing_pct;
+                    long_trail_hi = acc
+                        .get_position(sym, Side::Buy)
+                        .map(|pos| pos.entry_price)
+                        .unwrap_or(c.close);
                 }
             }
             Signal::Sell if has_long => {
@@ -214,18 +329,44 @@ fn run_backtest_with_script_and_candles(
                 if pnl > 0.0 {
                     wins += 1;
                 }
+                (long_stop, long_take, long_trail) = (None, None, None);
+                long_trail_hi = f64::NEG_INFINITY;
                 if !has_short {
                     execute_order(&mut acc, &mut eng, order_id, sym, Side::Sell, qty, c)?;
                     order_id += 1;
+                    let intent = eval.current_intent();
+                    short_stop = intent.stop_loss;
+                    short_take = intent.take_profit;
+                    short_trail = intent.trailing_pct;
+                    short_trail_lo = acc
+                        .get_position(sym, Side::Sell)
+                        .map(|pos| pos.entry_price)
+                        .unwrap_or(c.close);
                 }
             }
             Signal::Buy if !has_long => {
                 execute_order(&mut acc, &mut eng, order_id, sym, Side::Buy, qty, c)?;
                 order_id += 1;
+                let intent = eval.current_intent();
+                long_stop = intent.stop_loss;
+                long_take = intent.take_profit;
+                long_trail = intent.trailing_pct;
+                long_trail_hi = acc
+                    .get_position(sym, Side::Buy)
+                    .map(|pos| pos.entry_price)
+                    .unwrap_or(c.close);
             }
             Signal::Sell if !has_short => {
                 execute_order(&mut acc, &mut eng, order_id, sym, Side::Sell, qty, c)?;
                 order_id += 1;
+                let intent = eval.current_intent();
+                short_stop = intent.stop_loss;
+                short_take = intent.take_profit;
+                short_trail = intent.trailing_pct;
+                short_trail_lo = acc
+                    .get_position(sym, Side::Sell)
+                    .map(|pos| pos.entry_price)
+                    .unwrap_or(c.close);
             }
             _ => {}
         }
@@ -239,14 +380,14 @@ fn run_backtest_with_script_and_candles(
     }
 
     if let Some(c) = candles.last() {
-        if let Some(_pos) = acc.get_position(sym, Side::Buy) {
+        if acc.get_position(sym, Side::Buy).is_some() {
             let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate)?;
             total_trades += 1;
             if pnl > 0.0 {
                 wins += 1;
             }
         }
-        if let Some(_pos) = acc.get_position(sym, Side::Sell) {
+        if acc.get_position(sym, Side::Sell).is_some() {
             let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate)?;
             total_trades += 1;
             if pnl > 0.0 {
@@ -364,6 +505,104 @@ mod tests {
         let expected = 0.5 * ((111.0 - 100.0) - (111.0 + 100.0) * 0.001);
         assert!((result.total_pnl - expected).abs() < 1e-6);
         assert!((result.final_balance - (cfg.initial_balance + expected)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stop_loss_hits_and_closes_long_at_stop_price() {
+        // Long bei 100, stop_loss(95): naechste Kerze low 94 -> Close bei 95.
+        let candles = vec![
+            Candle::new(1000, 100.0, 101.0, 99.0, 100.0, 500.0),
+            Candle::new(2000, 99.0, 99.5, 94.0, 107.0, 600.0),
+        ];
+        let cfg = BacktestConfig::new(
+            PathBuf::from("dummy.omni"),
+            PathBuf::from("dummy.csv"),
+            200_000.0,
+            0.001,
+            0.0,
+            1.0,
+        );
+        let script = "stop_loss(95.0); if close() <= 105.0 { buy() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        let expected = (95.0 - 100.0) - (95.0 + 100.0) * 0.001;
+        assert_eq!(result.total_trades, 1);
+        assert!((result.total_pnl - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_take_profit_hits_and_closes_long_at_tp_price() {
+        // Long bei 100, take_profit(110): naechste Kerze high 111 -> Close bei 110.
+        let candles = vec![
+            Candle::new(1000, 100.0, 101.0, 99.0, 100.0, 500.0),
+            Candle::new(2000, 108.0, 111.0, 107.0, 112.0, 600.0),
+        ];
+        let cfg = BacktestConfig::new(
+            PathBuf::from("dummy.omni"),
+            PathBuf::from("dummy.csv"),
+            200_000.0,
+            0.001,
+            0.0,
+            1.0,
+        );
+        let script = "take_profit(110.0); if close() <= 105.0 { buy() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        let expected = (110.0 - 100.0) - (110.0 + 100.0) * 0.001;
+        assert_eq!(result.total_trades, 1);
+        assert!((result.total_pnl - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stop_loss_hits_and_closes_short_at_stop_price() {
+        // Short bei 100, stop_loss(105): naechste Kerze high 106 -> Close bei 105.
+        let candles = vec![
+            Candle::new(1000, 100.0, 101.0, 99.0, 100.0, 500.0),
+            Candle::new(2000, 104.0, 106.0, 103.0, 97.0, 600.0),
+        ];
+        let cfg = BacktestConfig::new(
+            PathBuf::from("dummy.omni"),
+            PathBuf::from("dummy.csv"),
+            200_000.0,
+            0.001,
+            0.0,
+            1.0,
+        );
+        let script = "stop_loss(105.0); if close() > 99.5 { sell() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        let expected = (100.0 - 105.0) - (105.0 + 100.0) * 0.001;
+        assert_eq!(result.total_trades, 1);
+        assert!((result.total_pnl - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_trailing_stop_ratchets_up_and_closes_long() {
+        // Long bei 100, trailing 5%: high 112 hebt den Stop auf 106.4,
+        // Kerze mit low 105 loest ihn aus.
+        let candles = vec![
+            Candle::new(1000, 100.0, 101.0, 99.0, 100.0, 500.0),
+            Candle::new(2000, 105.0, 112.0, 107.0, 110.0, 600.0),
+            Candle::new(3000, 108.0, 109.0, 105.0, 106.0, 700.0),
+        ];
+        let cfg = BacktestConfig::new(
+            PathBuf::from("dummy.omni"),
+            PathBuf::from("dummy.csv"),
+            200_000.0,
+            0.001,
+            0.0,
+            1.0,
+        );
+        let script = "trailing_stop(0.05); if close() < 101.0 { buy() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        let expected = (106.4 - 100.0) - (106.4 + 100.0) * 0.001;
+        assert_eq!(result.total_trades, 1);
+        assert!((result.total_pnl - expected).abs() < 1e-6);
     }
 
     #[test]

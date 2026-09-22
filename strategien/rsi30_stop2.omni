@@ -1,0 +1,2 @@
+stop_loss(close() * 0.980); if ema(20) > ema(50) && rsi(14) < 30 { buy() }
+stop_loss(close() * 1.020); if ema(20) < ema(50) && rsi(14) > 70 { sell() }
