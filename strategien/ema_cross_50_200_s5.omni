@@ -1,0 +1,2 @@
+if ema(50) > ema(200) { stop_loss(close()*0.95); buy() }
+if ema(50) < ema(200) { stop_loss(close()*1.05); sell() }
