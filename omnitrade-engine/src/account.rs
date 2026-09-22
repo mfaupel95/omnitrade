@@ -113,6 +113,45 @@ impl AccountState {
         Ok(())
     }
 
+    /// Closes an open position at `price`: realizes PnL, books the proceeds
+    /// (minus `fee_rate`-derived fees) into `balance` and removes the position.
+    /// Returns the realized PnL; `0.0` if no position of that side was open.
+    pub fn close_position_at(
+        &mut self,
+        symbol: &str,
+        side: Side,
+        price: f64,
+        fee_rate: f64,
+    ) -> Result<f64, EngineError> {
+        let key = (symbol.to_string(), side);
+        let Some(pos) = self.positions.get(&key) else {
+            return Ok(0.0);
+        };
+        let qty = pos.quantity;
+        let notional = qty * price;
+        let fee = notional * fee_rate;
+        let net_cash = match side {
+            // Closing a long sells inventory: proceeds come in.
+            Side::Buy => notional - fee,
+            // Closing a short buys it back: cost goes out.
+            Side::Sell => -notional - fee,
+        };
+        if self.balance + net_cash < 0.0 {
+            return Err(EngineError::InsufficientBalance {
+                required: -net_cash,
+                available: self.balance,
+            });
+        }
+        let pnl = match side {
+            Side::Buy => (price - pos.entry_price) * qty,
+            Side::Sell => (pos.entry_price - price) * qty,
+        };
+        self.balance += net_cash;
+        self.total_fees_paid += fee;
+        self.positions.remove(&key);
+        Ok(pnl)
+    }
+
     /// Returns a reference to a specific position (symbol, side).
     #[must_use]
     pub fn get_position(&self, symbol: &str, side: Side) -> Option<&Position> {

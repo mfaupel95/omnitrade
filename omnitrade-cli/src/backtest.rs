@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use omnitrade_core::{Candle, Order, OrderStatus, OrderType, Side, Tick};
 use omnitrade_engine::{AccountState, FeeSchedule, MatchingEngine, SlippageModel};
-use omnitrade_script::{parse, tokenize, Evaluator, Signal};
+use omnitrade_script::{parse, tokenize, Evaluator, ScriptError, Signal};
 use serde::Deserialize;
 
 /// Configuration options for running a backtest simulation.
@@ -130,22 +130,12 @@ fn execute_order(
 
 fn close_pos(
     acc: &mut AccountState,
-    eng: &mut MatchingEngine,
-    id: u64,
     sym: &str,
     side: Side,
     c: &Candle,
+    fee_rate: f64,
 ) -> Result<f64, Box<dyn Error>> {
-    if let Some(pos) = acc.get_position(sym, side).cloned() {
-        let fill_price = execute_order(acc, eng, id, sym, side.opposite(), pos.quantity, c)?;
-        let trade_pnl = match side {
-            Side::Buy => (fill_price - pos.entry_price) * pos.quantity,
-            Side::Sell => (pos.entry_price - fill_price) * pos.quantity,
-        };
-        Ok(trade_pnl)
-    } else {
-        Ok(0.0)
-    }
+    Ok(acc.close_position_at(sym, side, c.close, fee_rate)?)
 }
 
 /// Executes a strategy backtest against historical market candle data.
@@ -185,14 +175,20 @@ fn run_backtest_with_script_and_candles(
         let c = &candles[i];
         acc.update_unrealized_pnl(sym, Side::Buy, c.close).ok();
         acc.update_unrealized_pnl(sym, Side::Sell, c.close).ok();
-        let sig = eval.evaluate(&stmts, &candles[0..=i])?;
+        // Indicators need a warmup: with too few candles the script fails with
+        // EvalError. Treat that as "no signal yet" instead of aborting the backtest.
+        let sig = match eval.evaluate(&stmts, &candles[0..=i]) {
+            Ok(sig) => sig,
+            Err(ScriptError::EvalError { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        };
 
         let has_long = acc.get_position(sym, Side::Buy).is_some();
         let has_short = acc.get_position(sym, Side::Sell).is_some();
 
         match sig {
             Signal::Buy if has_short => {
-                let pnl = close_pos(&mut acc, &mut eng, order_id, sym, Side::Sell, c)?;
+                let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate)?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {
@@ -204,7 +200,7 @@ fn run_backtest_with_script_and_candles(
                 }
             }
             Signal::Sell if has_long => {
-                let pnl = close_pos(&mut acc, &mut eng, order_id, sym, Side::Buy, c)?;
+                let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate)?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {
@@ -236,15 +232,14 @@ fn run_backtest_with_script_and_candles(
 
     if let Some(c) = candles.last() {
         if let Some(_pos) = acc.get_position(sym, Side::Buy) {
-            let pnl = close_pos(&mut acc, &mut eng, order_id, sym, Side::Buy, c)?;
+            let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate)?;
             total_trades += 1;
             if pnl > 0.0 {
                 wins += 1;
             }
         }
         if let Some(_pos) = acc.get_position(sym, Side::Sell) {
-            order_id += 1;
-            let pnl = close_pos(&mut acc, &mut eng, order_id, sym, Side::Sell, c)?;
+            let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate)?;
             total_trades += 1;
             if pnl > 0.0 {
                 wins += 1;
@@ -310,6 +305,64 @@ mod tests {
 
         // Act & Assert
         assert!(load_candles_from_reader(csv_data.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn test_indicator_warmup_skips_early_candles() {
+        // A script with period indicators must not abort the backtest during warmup:
+        // EvalError ("insufficient candles") is treated as "no signal yet".
+        let candles: Vec<Candle> = (0..40)
+            .map(|i| {
+                let price = 100.0 + i as f64;
+                Candle::new(i * 1000, price, price + 1.0, price - 1.0, price, 100.0)
+            })
+            .collect();
+        let cfg = BacktestConfig {
+            script_path: PathBuf::from("unused"),
+            data_path: PathBuf::from("unused"),
+            initial_balance: 200_000.0,
+            fee_rate: 0.001,
+            slippage_bps: 5.0,
+            symbol: "BTCUSDT".to_string(),
+            quantity: 1.0,
+        };
+        let script = "if ema(20) > ema(50) && rsi(14) < 30 { buy() }
+            if ema(20) < ema(50) && rsi(14) > 70 { sell() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete despite indicator warmup");
+        assert!(result.final_balance > 0.0);
+    }
+
+    #[test]
+    fn test_close_realizes_pnl_without_phantom_leg() {
+        // Closing a long must realize PnL into the balance and remove the
+        // position — it must NOT leave a phantom short leg behind (the old
+        // double-counting bug: total_pnl != final_balance - initial_balance).
+        let candles = vec![
+            Candle::new(1000, 100.0, 101.0, 99.0, 100.0, 500.0),
+            Candle::new(2000, 110.0, 111.0, 109.0, 110.0, 600.0),
+            Candle::new(3000, 111.0, 112.0, 110.0, 111.0, 700.0),
+        ];
+        let cfg = BacktestConfig {
+            script_path: PathBuf::from("unused"),
+            data_path: PathBuf::from("unused"),
+            initial_balance: 200_000.0,
+            fee_rate: 0.001,
+            slippage_bps: 0.0,
+            symbol: "BTCUSDT".to_string(),
+            quantity: 1.0,
+        };
+        // Long only: buy below 105, never sell (final close at last candle).
+        let script = "if close() < 105 { buy() }
+";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        assert_eq!(result.total_trades, 1);
+        // Entry 100 + 0% slippage, exit 111, fees 0.001 each side.
+        let expected = (111.0 - 100.0) - (111.0 + 100.0) * 0.001;
+        assert!((result.total_pnl - expected).abs() < 1e-6);
+        assert!((result.final_balance - (cfg.initial_balance + expected)).abs() < 1e-6);
     }
 
     #[test]
@@ -381,8 +434,10 @@ mod tests {
         let result = run_backtest_with_script_and_candles(script, &candles, &config)
             .expect("backtest should succeed");
 
-        // Assert
-        assert_eq!(result.total_trades, 5);
-        // Phase 5: win_rate assertion adjusted for position model change
+        // Assert: 3 echte Schluesse (Long c1, Short c3, Long finale), alle profitabel.
+        // Vor dem Netting-Fix wurden Phantom-Gegenseiten als Trades mitgezaehlt (5).
+        assert_eq!(result.total_trades, 3);
+        assert!((result.win_rate - 1.0).abs() < f64::EPSILON);
+        assert!((result.final_balance - (config.initial_balance + 50.0)).abs() < 1e-6);
     }
 }
