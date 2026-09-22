@@ -135,7 +135,14 @@ fn close_pos(
     c: &Candle,
     fee_rate: f64,
 ) -> Result<f64, Box<dyn Error>> {
-    Ok(acc.close_position_at(sym, side, c.close, fee_rate)?)
+    let pnl = acc.close_position_at(sym, side, c.close, fee_rate)?;
+    if std::env::var("OMNI_TRACE").is_ok() {
+        eprintln!(
+            "TRACE close {side:?} @{} pnl={pnl:9.2} balance={:.2}",
+            c.close, acc.balance
+        );
+    }
+    Ok(pnl)
 }
 
 /// Executes a strategy backtest against historical market candle data.
