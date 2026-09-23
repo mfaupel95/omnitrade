@@ -299,6 +299,59 @@ impl Evaluator {
                     ),
                 })
             }
+            // highest/lowest rechnen ueber die `period` Kerzen VOR der aktuellen
+            // (exklusive) — Donchian/Breakout-Semantik: der aktuelle Close kann
+            // sonst nie das Fenster-High uebersteigen (high >= close).
+            "highest" => {
+                let period = self.eval_period_arg("highest", args, candles)?;
+                if candles.len() < period + 1 {
+                    return Err(ScriptError::EvalError {
+                        message: format!(
+                            "insufficient candles ({}) for highest with period {period}",
+                            candles.len()
+                        ),
+                    });
+                }
+                let start = candles.len() - 1 - period;
+                let window = &candles[start..candles.len() - 1];
+                Ok(window.iter().map(|c| c.high).fold(f64::NEG_INFINITY, f64::max))
+            }
+            "lowest" => {
+                let period = self.eval_period_arg("lowest", args, candles)?;
+                if candles.len() < period + 1 {
+                    return Err(ScriptError::EvalError {
+                        message: format!(
+                            "insufficient candles ({}) for lowest with period {period}",
+                            candles.len()
+                        ),
+                    });
+                }
+                let start = candles.len() - 1 - period;
+                let window = &candles[start..candles.len() - 1];
+                Ok(window.iter().map(|c| c.low).fold(f64::INFINITY, f64::min))
+            }
+            "atr" => {
+                let period = self.eval_period_arg("atr", args, candles)?;
+                if candles.len() < period + 1 {
+                    return Err(ScriptError::EvalError {
+                        message: format!(
+                            "insufficient candles ({}) for atr with period {period}",
+                            candles.len()
+                        ),
+                    });
+                }
+                let start = candles.len() - period;
+                let mut sum = 0.0;
+                for i in start..candles.len() {
+                    let c = &candles[i];
+                    let prev_close = candles[i - 1].close;
+                    let tr = (c.high - c.low)
+                        .max((c.high - prev_close).abs())
+                        .max((c.low - prev_close).abs());
+                    sum += tr;
+                }
+                Ok(sum / period as f64)
+            }
             _ => Err(ScriptError::UndefinedFunction {
                 name: name.to_string(),
             }),
@@ -518,5 +571,56 @@ mod tests {
         // Assert: current price 109 < highest 110 * (1 - 0.05) = 104.5, so no trigger
         assert_eq!(intent.signal, Signal::Buy);
         assert_eq!(intent.trailing_pct, Some(0.05));
+    }
+
+    #[test]
+    fn test_evaluate_highest_function() {
+        // highs = p+1: 11,13,12,16,14; highest(3) ueber letzte 3 = 16
+        let candles = helper_candles(&[10.0, 12.0, 11.0, 15.0, 13.0]);
+        let tokens = tokenize("if highest(3) < 20 { buy() }").expect("tokenize");
+        let stmts = parse(&tokens).expect("parse");
+        let mut evaluator = Evaluator::new();
+        let sig = evaluator
+            .evaluate(&stmts, &candles)
+            .expect("evaluation should succeed");
+        assert_eq!(sig, Signal::Buy);
+    }
+
+    #[test]
+    fn test_evaluate_lowest_function() {
+        // lows = p-1: 9,11,10,14,12; lowest(3) = 10
+        let candles = helper_candles(&[10.0, 12.0, 11.0, 15.0, 13.0]);
+        let tokens = tokenize("if lowest(3) > 5 { buy() }").expect("tokenize");
+        let stmts = parse(&tokens).expect("parse");
+        let mut evaluator = Evaluator::new();
+        let sig = evaluator
+            .evaluate(&stmts, &candles)
+            .expect("evaluation should succeed");
+        assert_eq!(sig, Signal::Buy);
+    }
+
+    #[test]
+    fn test_evaluate_atr_function() {
+        // closes 10,11,12; TR1=2, TR2=2 -> atr(2)=2
+        let candles = helper_candles(&[10.0, 11.0, 12.0]);
+        let tokens = tokenize("if atr(2) > 1 { buy() }").expect("tokenize");
+        let stmts = parse(&tokens).expect("parse");
+        let mut evaluator = Evaluator::new();
+        let sig = evaluator
+            .evaluate(&stmts, &candles)
+            .expect("evaluation should succeed");
+        assert_eq!(sig, Signal::Buy);
+    }
+
+    #[test]
+    fn test_evaluate_insufficient_highest() {
+        let candles = helper_candles(&[1.0, 2.0]);
+        let tokens = tokenize("if highest(5) > 0 { buy() }").expect("tokenize");
+        let stmts = parse(&tokens).expect("parse");
+        let mut evaluator = Evaluator::new();
+        assert!(matches!(
+            evaluator.evaluate(&stmts, &candles),
+            Err(ScriptError::EvalError { .. })
+        ));
     }
 }
