@@ -7,6 +7,7 @@ mod args;
 mod backtest;
 mod commands;
 mod live_loop;
+mod status;
 
 use args::{CliArgs, Commands};
 use backtest::{run_backtest, BacktestConfig};
@@ -64,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             symbol,
             network,
             initial_capital,
+            status_file,
         } => {
             let capital = initial_capital.unwrap_or(1000.0);
             handle_live(
@@ -72,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &symbol,
                 &network,
                 capital,
+                status_file,
             )
             .await?;
         }

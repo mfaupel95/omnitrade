@@ -77,6 +77,11 @@ pub enum Commands {
         /// Initial account balance for trading.
         #[arg(long, value_name = "AMOUNT")]
         initial_capital: Option<f64>,
+
+        /// Write a JSON status snapshot to this file while running
+        /// (read-only view for dashboards; written atomically).
+        #[arg(long, value_name = "PATH")]
+        status_file: Option<PathBuf>,
     },
     /// Emergency kill switch to halt all trading operations.
     ///
@@ -243,6 +248,7 @@ mod tests {
             symbol,
             network,
             initial_capital,
+            ..
         } = parsed.command
         {
             assert_eq!(script, Some(PathBuf::from("strategy.omni")));
@@ -278,6 +284,7 @@ mod tests {
             symbol,
             network,
             initial_capital,
+            ..
         } = parsed.command
         {
             assert_eq!(script, None);
@@ -317,6 +324,7 @@ mod tests {
             symbol,
             network,
             initial_capital,
+            ..
         } = parsed.command
         {
             assert_eq!(script, Some(PathBuf::from("strategy.omni")));

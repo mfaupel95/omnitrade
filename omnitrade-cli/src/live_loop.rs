@@ -4,6 +4,7 @@
 //! evaluates a strategy script against each candle, checks risk limits,
 //! and places orders via the exchange trading interface.
 
+use crate::status::StatusWriter;
 use omnitrade_core::{Candle, OrderStatus, Side, TimeInForce};
 use omnitrade_exchange::{ExchangeStream, ExchangeTrading, Network, OrderRequest};
 use omnitrade_risk::guard::RiskGuard;
@@ -51,6 +52,7 @@ pub enum LiveLoopError {
 /// - `exchange_stream`: Implementation of ExchangeStream trait
 /// - `exchange_trading`: Implementation of ExchangeTrading trait
 /// - `risk_guard`: RiskGuard instance for risk validation
+/// - `status`: Snapshot writer for passive observers (`--status-file`)
 ///
 /// # Returns
 /// `Ok(())` if loop completes gracefully, or `Err(LiveLoopError)` on fatal error.
@@ -58,8 +60,45 @@ pub enum LiveLoopError {
 /// # Error Handling
 /// Non-fatal errors (individual order rejections, risk violations) are logged but
 /// do not halt the loop. The loop continues monitoring for new signals.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub async fn live_loop(
+    script_path: &str,
+    symbol: &str,
+    network: Network,
+    initial_capital: f64,
+    exchange_stream: impl ExchangeStream,
+    exchange_trading: impl ExchangeTrading,
+    risk_guard: &mut RiskGuard,
+    status: &mut StatusWriter,
+) -> Result<(), LiveLoopError> {
+    let result = run_loop(
+        script_path,
+        symbol,
+        network,
+        initial_capital,
+        exchange_stream,
+        exchange_trading,
+        risk_guard,
+        status,
+    )
+    .await;
+    match &result {
+        Ok(()) => status.set_state("stopped"),
+        Err(e) => status.set_error(&e.to_string()),
+    }
+    flush_status(status);
+    result
+}
+
+/// Writes the snapshot; a failed write is logged and never stops trading.
+fn flush_status(status: &mut StatusWriter) {
+    if let Err(e) = status.flush() {
+        warn!("Status file write failed: {}", e);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_loop(
     script_path: &str,
     symbol: &str,
     network: Network,
@@ -67,6 +106,7 @@ pub async fn live_loop(
     mut exchange_stream: impl ExchangeStream,
     exchange_trading: impl ExchangeTrading,
     risk_guard: &mut RiskGuard,
+    status: &mut StatusWriter,
 ) -> Result<(), LiveLoopError> {
     // Validate network (testnet-first, mainnet requires explicit opt-in)
     if network == Network::Mainnet {
@@ -77,6 +117,7 @@ pub async fn live_loop(
 
     // Load and validate script file
     let script_content = fs::read_to_string(script_path)?;
+    flush_status(status);
 
     // Connect to exchange WebSocket
     exchange_stream
@@ -104,12 +145,21 @@ pub async fn live_loop(
             Ok(sig) => sig,
             Err(e) => {
                 warn!("Script evaluation error for {}: {}", symbol, e);
+                status.record_candle(candle.close, candle.timestamp_ms, "hold");
+                flush_status(status);
                 continue;
             }
         };
+        let signal_name = match signal {
+            omnitrade_script::Signal::Buy => "buy",
+            omnitrade_script::Signal::Sell => "sell",
+            omnitrade_script::Signal::Hold => "hold",
+        };
+        status.record_candle(candle.close, candle.timestamp_ms, signal_name);
 
         // Skip if no signal
         if signal == omnitrade_script::Signal::Hold {
+            flush_status(status);
             continue;
         }
 
@@ -136,12 +186,26 @@ pub async fn live_loop(
         {
             Ok(order) => {
                 info!("Order filled: {:?}", order);
+                let outcome = if order.status == OrderStatus::Filled {
+                    "filled"
+                } else {
+                    "placed"
+                };
+                status.record_order(signal_name, order_req.quantity, candle.close, outcome, "");
             }
             Err(e) => {
                 warn!("Order rejected by RiskGuard: {}", e);
+                status.record_order(
+                    signal_name,
+                    order_req.quantity,
+                    candle.close,
+                    "rejected",
+                    &e.to_string(),
+                );
                 // Continue loop; do not halt on single order failure
             }
         }
+        flush_status(status);
     }
 
     // Graceful disconnect

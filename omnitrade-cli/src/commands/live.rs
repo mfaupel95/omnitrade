@@ -4,9 +4,10 @@
 //! instantiates RiskGuard, and delegates to the live_loop.
 
 use crate::live_loop::live_loop;
+use crate::status::StatusWriter;
 use omnitrade_exchange::{credentials, BinanceClient, Network};
 use omnitrade_risk::guard::RiskGuard;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// Handles the live trading command.
@@ -26,6 +27,7 @@ pub async fn handle_live(
     symbol: &str,
     network_str: &str,
     initial_capital: f64,
+    status_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate that either script or grid is specified
     if script_path.is_none() && grid_config_path.is_none() {
@@ -42,13 +44,12 @@ pub async fn handle_live(
     };
 
     // Mainnet safety gate: require explicit environment variable
-    if network == Network::Mainnet
-        && std::env::var("OMNITRADE_MAINNET_APPROVED").is_err() {
-            return Err(
-                "Error: Mainnet trading requires OMNITRADE_MAINNET_APPROVED environment variable"
-                    .into(),
-            );
-        }
+    if network == Network::Mainnet && std::env::var("OMNITRADE_MAINNET_APPROVED").is_err() {
+        return Err(
+            "Error: Mainnet trading requires OMNITRADE_MAINNET_APPROVED environment variable"
+                .into(),
+        );
+    }
 
     // Initialize risk guard with appropriate limits
     let mut risk_guard = match network {
@@ -89,6 +90,13 @@ pub async fn handle_live(
 
         // Run the live loop
         let script_str = script_path.to_string_lossy().to_string();
+        let mut status = StatusWriter::new(
+            status_file,
+            symbol,
+            &network.to_string(),
+            &script_str,
+            initial_capital,
+        );
         live_loop(
             &script_str,
             symbol,
@@ -97,6 +105,7 @@ pub async fn handle_live(
             stream_client,
             trading_client,
             &mut risk_guard,
+            &mut status,
         )
         .await?;
 
