@@ -5,6 +5,10 @@
 //! trading needs API keys created in the OKX demo account; live keys are
 //! rejected there.
 //!
+//! Keys are bound to a region: accounts in the EEA only work against
+//! `eea.okx.com` (`with_eea(true)`); elsewhere OKX answers `50119 API key
+//! doesn't exist`. EEA demo balances hold USD/USDC, not USDT (`BTCUSDC`).
+//!
 //! Differences to the Binance connector:
 //! - OKX signs with a passphrase in addition to key and secret.
 //! - Instruments are `BTC-USDT`; `BTCUSDT` is converted automatically.
@@ -35,6 +39,9 @@ use tracing::{info, warn};
 const REST_URL: &str = "https://www.okx.com";
 const WS_BUSINESS_DEMO: &str = "wss://wspap.okx.com:8443/ws/v5/business";
 const WS_BUSINESS_LIVE: &str = "wss://ws.okx.com:8443/ws/v5/business";
+const REST_URL_EEA: &str = "https://eea.okx.com";
+const WS_BUSINESS_DEMO_EEA: &str = "wss://wseeapap.okx.com:8443/ws/v5/business";
+const WS_BUSINESS_LIVE_EEA: &str = "wss://wseea.okx.com:8443/ws/v5/business";
 /// OKX drops idle sockets after 30 s; ping well before that.
 const PING_EVERY: Duration = Duration::from_secs(20);
 const QUOTES: [&str; 6] = ["USDT", "USDC", "EUR", "USD", "BTC", "ETH"];
@@ -229,6 +236,7 @@ pub struct OkxClient {
     base_url: String,
     credentials: Option<(ApiCredentials, String)>,
     demo: bool,
+    eea: bool,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -250,6 +258,7 @@ impl OkxClient {
             base_url: REST_URL.to_string(),
             credentials: Some((credentials, passphrase)),
             demo,
+            eea: false,
             tasks: Vec::new(),
         })
     }
@@ -261,15 +270,24 @@ impl OkxClient {
             base_url: REST_URL.to_string(),
             credentials: None,
             demo,
+            eea: false,
             tasks: Vec::new(),
         }
     }
 
+    /// Switches REST and WebSocket to the EEA hosts (keys of EU accounts).
+    pub fn with_eea(mut self, eea: bool) -> Self {
+        self.eea = eea;
+        self.base_url = if eea { REST_URL_EEA } else { REST_URL }.to_string();
+        self
+    }
+
     fn ws_url(&self) -> &'static str {
-        if self.demo {
-            WS_BUSINESS_DEMO
-        } else {
-            WS_BUSINESS_LIVE
+        match (self.demo, self.eea) {
+            (true, false) => WS_BUSINESS_DEMO,
+            (false, false) => WS_BUSINESS_LIVE,
+            (true, true) => WS_BUSINESS_DEMO_EEA,
+            (false, true) => WS_BUSINESS_LIVE_EEA,
         }
     }
 
@@ -684,6 +702,13 @@ mod tests {
         let c = OkxClient::new(creds, "p".into()).unwrap();
         assert_eq!(c.ws_url(), WS_BUSINESS_DEMO);
         assert_eq!(OkxClient::public(false).ws_url(), WS_BUSINESS_LIVE);
+        let eea = OkxClient::public(true).with_eea(true);
+        assert_eq!(eea.ws_url(), WS_BUSINESS_DEMO_EEA);
+        assert_eq!(eea.base_url, REST_URL_EEA);
+        assert_eq!(
+            OkxClient::public(false).with_eea(true).ws_url(),
+            WS_BUSINESS_LIVE_EEA
+        );
     }
 
     /// Real OKX demo socket, public data only. Run with
@@ -700,5 +725,22 @@ mod tests {
             "socket closed right after subscribe"
         );
         c.disconnect().await.unwrap();
+    }
+
+    /// Read-only check of the demo keys: `OKX_DEMO_API_KEY`, `_SECRET`,
+    /// `_PASSPHRASE`. Prints balances only, never the keys.
+    #[tokio::test]
+    #[ignore]
+    async fn live_demo_balance_readable() {
+        let var = |n: &str| std::env::var(format!("OKX_DEMO_API_{n}")).unwrap_or_default();
+        let creds = ApiCredentials::new(var("KEY"), var("SECRET"), Network::Testnet);
+        let eea = std::env::var("OKX_REGION").is_ok_and(|r| r.eq_ignore_ascii_case("eea"));
+        let c = OkxClient::new(creds, var("PASSPHRASE"))
+            .unwrap()
+            .with_eea(eea);
+        let account = c.get_balance().await.unwrap();
+        for (asset, b) in &account.balances {
+            println!("{asset}: frei {} gesperrt {}", b.free, b.locked);
+        }
     }
 }

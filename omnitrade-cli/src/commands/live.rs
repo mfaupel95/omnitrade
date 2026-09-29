@@ -97,9 +97,23 @@ pub async fn handle_live(
             let creds =
                 credentials::ApiCredentials::new(var("KEY")?, var("SECRET")?, creds_network);
             let passphrase = var("PASSPHRASE")?;
+            // Keys of EU accounts only work on eea.okx.com (OKX_REGION=eea).
+            let eea = match std::env::var("OKX_REGION")
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str()
+            {
+                "" | "global" => false,
+                "eea" => true,
+                other => {
+                    return Err(
+                        format!("OKX_REGION must be 'eea' or 'global', got '{other}'").into(),
+                    )
+                }
+            };
             // Streaming needs &mut, trading &self: one client per role.
-            let stream_client = OkxClient::new(creds.clone(), passphrase.clone())?;
-            let trading_client = OkxClient::new(creds, passphrase)?;
+            let stream_client = OkxClient::new(creds.clone(), passphrase.clone())?.with_eea(eea);
+            let trading_client = OkxClient::new(creds, passphrase)?.with_eea(eea);
             live_loop(
                 &script_str,
                 symbol,
