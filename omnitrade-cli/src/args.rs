@@ -74,7 +74,8 @@ pub enum Commands {
         #[arg(long, value_name = "NETWORK", default_value = "testnet")]
         network: String,
 
-        /// Initial account balance for trading.
+        /// Capital per position in quote currency (default 500). Long-only:
+        /// a buy spends it when flat, a sell closes the position.
         #[arg(long, value_name = "AMOUNT")]
         initial_capital: Option<f64>,
 

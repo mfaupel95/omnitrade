@@ -134,6 +134,8 @@ async fn run_loop(
 
     // Initialize candle buffer for script evaluation
     let mut candle_buffer: Vec<Candle> = Vec::new();
+    // Base quantity held from our own orders (long-only spot).
+    let mut position = 0.0_f64;
 
     // Main event loop: process each candle as it arrives
     while let Some(candle) = candle_rx.recv().await {
@@ -170,8 +172,13 @@ async fn run_loop(
             omnitrade_script::Signal::Hold => continue,
         };
 
-        // Create order request (market order, fixed quantity for now)
-        let order_req = OrderRequest::market(symbol.to_string(), side, 1.0);
+        // Size from capital (buy) or current position (sell); skip otherwise
+        let Some(quantity) = order_quantity(side, position, initial_capital, candle.close) else {
+            info!("{} signal ignored (position {})", signal_name, position);
+            flush_status(status);
+            continue;
+        };
+        let order_req = OrderRequest::market(symbol.to_string(), side, quantity);
         info!("Placing order: {:?}", order_req);
 
         // Place order and check risk guard
@@ -190,6 +197,15 @@ async fn run_loop(
                     "filled"
                 } else {
                     "placed"
+                };
+                let filled = if order.filled_quantity > 0.0 {
+                    order.filled_quantity
+                } else {
+                    order_req.quantity
+                };
+                position = match side {
+                    Side::Buy => position + filled,
+                    Side::Sell => (position - filled).max(0.0),
                 };
                 status.record_order(signal_name, order_req.quantity, candle.close, outcome, "");
             }
@@ -219,6 +235,25 @@ async fn run_loop(
 
 /// Helper: Place order after passing risk guard checks.
 ///
+/// Smallest quantity step used when rounding (1e-8, OKX/Binance BTC lot).
+const QTY_STEP: f64 = 1e-8;
+/// Share of the position sold on exit; keeps room for a buy fee that the
+/// exchange deducted in the base currency.
+const SELL_SHARE: f64 = 0.998;
+
+/// Order quantity for a long-only spot strategy, rounded down to `QTY_STEP`.
+/// Buy spends `capital` only when flat; sell closes an open position.
+/// `None` means: no order for this signal.
+fn order_quantity(side: Side, position: f64, capital: f64, price: f64) -> Option<f64> {
+    let raw = match side {
+        Side::Buy if position <= QTY_STEP && price > 0.0 => capital / price,
+        Side::Sell if position > QTY_STEP => position * SELL_SHARE,
+        _ => return None,
+    };
+    let qty = (raw / QTY_STEP).floor() * QTY_STEP;
+    (qty > 0.0).then_some(qty)
+}
+
 /// Creates a mock Order from the request, checks it against RiskGuard,
 /// and if approved, submits to the exchange.
 #[allow(dead_code)]
@@ -294,6 +329,21 @@ async fn place_order_with_risk_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_order_quantity_long_only() {
+        // Flat: buy for the whole capital, rounded down.
+        let q = order_quantity(Side::Buy, 0.0, 500.0, 83_636.2).unwrap();
+        assert!((q - 0.00597827).abs() < 1e-12, "{q}");
+        assert!(q * 83_636.2 <= 500.0);
+        // Already long: no second buy; flat: nothing to sell.
+        assert_eq!(order_quantity(Side::Buy, 0.01, 1000.0, 80_000.0), None);
+        assert_eq!(order_quantity(Side::Sell, 0.0, 1000.0, 80_000.0), None);
+        // Long: sell the position minus the fee buffer.
+        let s = order_quantity(Side::Sell, 0.01, 1000.0, 80_000.0).unwrap();
+        assert!((s - 0.00998).abs() < 1e-12, "{s}");
+        assert_eq!(order_quantity(Side::Buy, 0.0, 1000.0, 0.0), None);
+    }
 
     #[test]
     fn test_live_loop_error_display() {

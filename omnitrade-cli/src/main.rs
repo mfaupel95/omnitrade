@@ -68,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status_file,
             exchange,
         } => {
-            let capital = initial_capital.unwrap_or(1000.0);
+            // Live default: 500 USD(T) per position.
+            let capital = initial_capital.unwrap_or(500.0);
             handle_live(
                 script.as_deref(),
                 grid_config.as_deref(),

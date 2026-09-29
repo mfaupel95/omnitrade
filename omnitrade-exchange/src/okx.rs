@@ -323,6 +323,17 @@ impl OkxClient {
     }
 }
 
+/// Plain decimal with at most 8 places, no float noise (`0.01195654`).
+pub fn decimal(x: f64) -> String {
+    let s = format!("{x:.8}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Body for `POST /api/v5/trade/order` (cash spot; `sz` in base currency).
 pub fn order_body(req: &OrderRequest) -> Result<Value, ExchangeError> {
     if req.quantity <= 0.0 {
@@ -338,7 +349,7 @@ pub fn order_body(req: &OrderRequest) -> Result<Value, ExchangeError> {
         "instId": inst_id(&req.symbol),
         "tdMode": "cash",
         "side": side,
-        "sz": req.quantity.to_string(),
+        "sz": decimal(req.quantity),
     });
     match req.order_type {
         OrderType::Market => {
@@ -652,6 +663,8 @@ mod tests {
         assert_eq!(m["ordType"], "market");
         assert_eq!(m["tgtCcy"], "base_ccy");
         assert_eq!(m["sz"], "0.01");
+        assert_eq!(decimal(0.011956540000000001), "0.01195654");
+        assert_eq!(decimal(2.0), "2");
         let l = order_body(&OrderRequest::limit(
             "ETHUSDT".into(),
             Side::Sell,
