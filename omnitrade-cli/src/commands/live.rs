@@ -5,7 +5,7 @@
 
 use crate::live_loop::live_loop;
 use crate::status::StatusWriter;
-use omnitrade_exchange::{credentials, BinanceClient, Network};
+use omnitrade_exchange::{credentials, BinanceClient, Network, OkxClient};
 use omnitrade_risk::guard::RiskGuard;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -28,7 +28,12 @@ pub async fn handle_live(
     network_str: &str,
     initial_capital: f64,
     status_file: Option<PathBuf>,
+    exchange: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if exchange != "binance" && exchange != "okx" {
+        return Err(format!("Invalid exchange: {}. Use 'binance' or 'okx'", exchange).into());
+    }
+
     // Validate that either script or grid is specified
     if script_path.is_none() && grid_config_path.is_none() {
         return Err("Error: either --script or --grid-config must be provided".into());
@@ -65,49 +70,75 @@ pub async fn handle_live(
         info!("Using strategy script: {}", script_path.display());
         info!("Script-based trading mode enabled");
 
-        // Load credentials from environment
-        let api_key = std::env::var("BINANCE_API_KEY")
-            .map_err(|_| "BINANCE_API_KEY environment variable not set")?;
-        let api_secret = std::env::var("BINANCE_API_SECRET")
-            .map_err(|_| "BINANCE_API_SECRET environment variable not set")?;
-
         let creds_network = match network {
             Network::Testnet => credentials::Network::Testnet,
             Network::Mainnet => credentials::Network::Mainnet,
         };
-
-        let creds = credentials::ApiCredentials::new(api_key, api_secret, creds_network);
-        let trading_creds = creds.clone();
-
-        // Two clients, one per role: the stream client owns the WebSocket
-        // connection (connect() takes &mut self), the trading client places
-        // orders (takes &self). BinanceClient is not Clone, so each role gets
-        // its own instance built from the same credentials.
-        let mut stream_client = BinanceClient::new();
-        stream_client.set_credentials(creds)?;
-        let mut trading_client = BinanceClient::new();
-        trading_client.set_credentials(trading_creds)?;
-
-        // Run the live loop
         let script_str = script_path.to_string_lossy().to_string();
         let mut status = StatusWriter::new(
             status_file,
+            exchange,
             symbol,
             &network.to_string(),
             &script_str,
             initial_capital,
         );
-        live_loop(
-            &script_str,
-            symbol,
-            network,
-            initial_capital,
-            stream_client,
-            trading_client,
-            &mut risk_guard,
-            &mut status,
-        )
-        .await?;
+
+        if exchange == "okx" {
+            // Demo keys for testnet, live keys only behind the mainnet gate.
+            let prefix = match network {
+                Network::Testnet => "OKX_DEMO_API",
+                Network::Mainnet => "OKX_LIVE_API",
+            };
+            let var = |name: &str| {
+                std::env::var(format!("{prefix}_{name}"))
+                    .map_err(|_| format!("{prefix}_{name} environment variable not set"))
+            };
+            let creds =
+                credentials::ApiCredentials::new(var("KEY")?, var("SECRET")?, creds_network);
+            let passphrase = var("PASSPHRASE")?;
+            // Streaming needs &mut, trading &self: one client per role.
+            let stream_client = OkxClient::new(creds.clone(), passphrase.clone())?;
+            let trading_client = OkxClient::new(creds, passphrase)?;
+            live_loop(
+                &script_str,
+                symbol,
+                network,
+                initial_capital,
+                stream_client,
+                trading_client,
+                &mut risk_guard,
+                &mut status,
+            )
+            .await?;
+        } else {
+            let api_key = std::env::var("BINANCE_API_KEY")
+                .map_err(|_| "BINANCE_API_KEY environment variable not set")?;
+            let api_secret = std::env::var("BINANCE_API_SECRET")
+                .map_err(|_| "BINANCE_API_SECRET environment variable not set")?;
+            let creds = credentials::ApiCredentials::new(api_key, api_secret, creds_network);
+            let trading_creds = creds.clone();
+
+            // Two clients, one per role: the stream client owns the WebSocket
+            // connection (connect() takes &mut self), the trading client places
+            // orders (takes &self). BinanceClient is not Clone, so each role gets
+            // its own instance built from the same credentials.
+            let mut stream_client = BinanceClient::new();
+            stream_client.set_credentials(creds)?;
+            let mut trading_client = BinanceClient::new();
+            trading_client.set_credentials(trading_creds)?;
+            live_loop(
+                &script_str,
+                symbol,
+                network,
+                initial_capital,
+                stream_client,
+                trading_client,
+                &mut risk_guard,
+                &mut status,
+            )
+            .await?;
+        }
 
         info!("Live trading loop completed gracefully");
     } else if grid_config_path.is_some() {

@@ -82,6 +82,11 @@ pub enum Commands {
         /// (read-only view for dashboards; written atomically).
         #[arg(long, value_name = "PATH")]
         status_file: Option<PathBuf>,
+
+        /// Exchange: "binance" or "okx". OKX testnet means OKX demo trading
+        /// (keys from OKX_DEMO_API_KEY / _SECRET / _PASSPHRASE).
+        #[arg(long, value_name = "EXCHANGE", default_value = "binance")]
+        exchange: String,
     },
     /// Emergency kill switch to halt all trading operations.
     ///

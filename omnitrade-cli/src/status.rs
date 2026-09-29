@@ -37,6 +37,7 @@ pub struct LiveStatus {
     pub schema: u32,
     /// "starting", "running", "stopped" or "error".
     pub state: String,
+    pub exchange: String,
     pub symbol: String,
     pub network: String,
     pub script: String,
@@ -74,6 +75,7 @@ pub struct StatusWriter {
 impl StatusWriter {
     pub fn new(
         path: Option<PathBuf>,
+        exchange: &str,
         symbol: &str,
         network: &str,
         script: &str,
@@ -85,6 +87,7 @@ impl StatusWriter {
             status: LiveStatus {
                 schema: SCHEMA,
                 state: "starting".to_string(),
+                exchange: exchange.to_string(),
                 symbol: symbol.to_string(),
                 network: network.to_string(),
                 script: script.to_string(),
@@ -192,7 +195,14 @@ mod tests {
     #[test]
     fn test_flush_writes_readable_json() {
         let path = temp_path("flush");
-        let mut w = StatusWriter::new(Some(path.clone()), "BTCUSDT", "testnet", "s.omni", 1000.0);
+        let mut w = StatusWriter::new(
+            Some(path.clone()),
+            "okx",
+            "BTCUSDT",
+            "testnet",
+            "s.omni",
+            1000.0,
+        );
         w.record_candle(60000.0, 1_700_000_000_000, "buy");
         w.record_order("buy", 1.0, 60000.0, "filled", "");
         w.flush().unwrap();
@@ -202,6 +212,7 @@ mod tests {
         assert_eq!(value["schema"], SCHEMA);
         assert_eq!(value["state"], "running");
         assert_eq!(value["symbol"], "BTCUSDT");
+        assert_eq!(value["exchange"], "okx");
         assert_eq!(value["candles_seen"], 1);
         assert_eq!(value["orders_placed"], 1);
         assert_eq!(value["net_quantity"], 1.0);
@@ -212,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_rejections_count_separately_and_keep_position() {
-        let mut w = StatusWriter::new(None, "BTCUSDT", "testnet", "s.omni", 1000.0);
+        let mut w = StatusWriter::new(None, "okx", "BTCUSDT", "testnet", "s.omni", 1000.0);
         w.record_order("sell", 2.0, 100.0, "filled", "");
         w.record_order("buy", 1.0, 100.0, "rejected", "max position");
         let s = w.status();
@@ -224,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_recent_orders_are_capped() {
-        let mut w = StatusWriter::new(None, "BTCUSDT", "testnet", "s.omni", 1000.0);
+        let mut w = StatusWriter::new(None, "okx", "BTCUSDT", "testnet", "s.omni", 1000.0);
         for i in 0..(MAX_ORDERS + 5) {
             w.record_order("buy", 1.0, i as f64, "filled", "");
         }
@@ -235,13 +246,13 @@ mod tests {
 
     #[test]
     fn test_without_path_flush_is_noop() {
-        let mut w = StatusWriter::new(None, "BTCUSDT", "testnet", "s.omni", 1000.0);
+        let mut w = StatusWriter::new(None, "okx", "BTCUSDT", "testnet", "s.omni", 1000.0);
         assert!(w.flush().is_ok());
     }
 
     #[test]
     fn test_error_sets_state() {
-        let mut w = StatusWriter::new(None, "BTCUSDT", "testnet", "s.omni", 1000.0);
+        let mut w = StatusWriter::new(None, "okx", "BTCUSDT", "testnet", "s.omni", 1000.0);
         w.set_error("ws closed");
         assert_eq!(w.status().state, "error");
         assert_eq!(w.status().last_error, "ws closed");

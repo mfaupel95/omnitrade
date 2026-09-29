@@ -124,7 +124,7 @@ async fn run_loop(
         .connect()
         .await
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))?;
-    info!("Connected to Binance Testnet");
+    info!("Connected to exchange stream");
 
     // Subscribe to candle stream
     let mut candle_rx = exchange_stream

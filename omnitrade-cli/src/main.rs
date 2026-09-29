@@ -66,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             network,
             initial_capital,
             status_file,
+            exchange,
         } => {
             let capital = initial_capital.unwrap_or(1000.0);
             handle_live(
@@ -75,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &network,
                 capital,
                 status_file,
+                &exchange,
             )
             .await?;
         }
