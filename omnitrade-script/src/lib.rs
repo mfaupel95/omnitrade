@@ -8,6 +8,7 @@
 pub mod ast;
 pub mod error;
 pub mod evaluator;
+pub mod extra;
 pub mod grid;
 pub mod lexer;
 pub mod order_intent;
