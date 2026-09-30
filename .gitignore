@@ -30,3 +30,4 @@ secrets/
 
 # Claude-Code-Worktrees gehoeren nicht in den Verlauf.
 .claude/
+/target-live/
