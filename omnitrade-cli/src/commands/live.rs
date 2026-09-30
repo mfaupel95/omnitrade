@@ -3,7 +3,7 @@
 //! Orchestrates live trading setup: initializes exchange connections,
 //! instantiates RiskGuard, and delegates to the live_loop.
 
-use crate::live_loop::live_loop;
+use crate::live_loop::{live_loop, FeedSpec};
 use crate::status::StatusWriter;
 use omnitrade_exchange::{credentials, BinanceClient, Network, OkxClient};
 use omnitrade_risk::guard::RiskGuard;
@@ -21,6 +21,7 @@ use tracing::info;
 /// # Errors
 /// Returns error if network parsing fails, file I/O fails,
 /// or Binance connection/credential issues occur.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_live(
     script_path: Option<&Path>,
     grid_config_path: Option<&Path>,
@@ -29,6 +30,7 @@ pub async fn handle_live(
     initial_capital: f64,
     status_file: Option<PathBuf>,
     exchange: &str,
+    interval: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if exchange != "binance" && exchange != "okx" {
         return Err(format!("Invalid exchange: {}. Use 'binance' or 'okx'", exchange).into());
@@ -114,6 +116,16 @@ pub async fn handle_live(
             // Streaming needs &mut, trading &self: one client per role.
             let stream_client = OkxClient::new(creds.clone(), passphrase.clone())?.with_eea(eea);
             let trading_client = OkxClient::new(creds, passphrase)?.with_eea(eea);
+            // Preload closed candles so long indicators work from the first bar.
+            let warmup = trading_client
+                .recent_candles(symbol, interval, 300)
+                .await
+                .map_err(|e| format!("could not load candle history: {e}"))?;
+            info!("Warmup: {} closed {} candles", warmup.len(), interval);
+            let feed = FeedSpec {
+                interval: interval.to_string(),
+                warmup,
+            };
             live_loop(
                 &script_str,
                 symbol,
@@ -123,6 +135,7 @@ pub async fn handle_live(
                 trading_client,
                 &mut risk_guard,
                 &mut status,
+                feed,
             )
             .await?;
         } else {
@@ -150,6 +163,7 @@ pub async fn handle_live(
                 trading_client,
                 &mut risk_guard,
                 &mut status,
+                FeedSpec::live(interval),
             )
             .await?;
         }

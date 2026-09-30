@@ -161,6 +161,13 @@ pub fn parse_candle_push(text: &str) -> Vec<Candle> {
         .collect()
 }
 
+/// Closed candles of a REST history response, oldest first (OKX sends newest first).
+pub fn parse_history(text: &str) -> Vec<Candle> {
+    let mut candles = parse_candle_push(text);
+    candles.sort_by_key(|c| c.timestamp_ms);
+    candles
+}
+
 /// Maps one OKX order object (`/trade/order`, `/trade/orders-pending`).
 pub fn parse_order(o: &Value) -> Result<Order, ExchangeError> {
     let text = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("");
@@ -289,6 +296,46 @@ impl OkxClient {
             (true, true) => WS_BUSINESS_DEMO_EEA,
             (false, true) => WS_BUSINESS_LIVE_EEA,
         }
+    }
+
+    /// The most recent closed candles (oldest first, at most 300), from the
+    /// public `market/candles` endpoint. Used to warm up indicators at start.
+    pub async fn recent_candles(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        let channel = candle_channel(interval)?;
+        let bar = channel.trim_start_matches("candle");
+        let url = format!(
+            "{}/api/v5/market/candles?instId={}&bar={bar}&limit={}",
+            self.base_url,
+            inst_id(symbol),
+            limit.clamp(1, 300)
+        );
+        let text = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ExchangeError::ConnectionFailed {
+                url: url.clone(),
+                reason: e.to_string(),
+            })?
+            .text()
+            .await
+            .map_err(|e| ExchangeError::ConnectionFailed {
+                url: url.clone(),
+                reason: e.to_string(),
+            })?;
+        let v: Value =
+            serde_json::from_str(&text).map_err(|e| ExchangeError::MessageParseFailed {
+                raw: text.chars().take(200).collect(),
+                reason: e.to_string(),
+            })?;
+        check_envelope(&v)?;
+        Ok(parse_history(&text))
     }
 
     async fn request(
@@ -742,5 +789,17 @@ mod tests {
         for (asset, b) in &account.balances {
             println!("{asset}: frei {} gesperrt {}", b.free, b.locked);
         }
+    }
+
+    #[test]
+    fn test_parse_history_sorts_and_drops_open_bar() {
+        let text = r#"{"code":"0","data":[
+            ["300","1","2","0.5","1.5","3","0","0","0"],
+            ["200","1","2","0.5","1.4","3","0","0","1"],
+            ["100","1","2","0.5","1.3","3","0","0","1"]]}"#;
+        let c = parse_history(text);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].timestamp_ms, 100);
+        assert_eq!(c[1].close, 1.4);
     }
 }

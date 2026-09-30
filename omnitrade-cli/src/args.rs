@@ -88,6 +88,11 @@ pub enum Commands {
         /// (keys from OKX_DEMO_API_KEY / _SECRET / _PASSPHRASE).
         #[arg(long, value_name = "EXCHANGE", default_value = "binance")]
         exchange: String,
+
+        /// Candle length the strategy runs on, e.g. "1m", "15m", "1h", "4h",
+        /// "1d". On OKX the last 300 closed candles preload the indicators.
+        #[arg(long, value_name = "INTERVAL", default_value = "1m")]
+        interval: String,
     },
     /// Emergency kill switch to halt all trading operations.
     ///

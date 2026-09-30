@@ -70,6 +70,7 @@ pub async fn live_loop(
     exchange_trading: impl ExchangeTrading,
     risk_guard: &mut RiskGuard,
     status: &mut StatusWriter,
+    feed: FeedSpec,
 ) -> Result<(), LiveLoopError> {
     let result = run_loop(
         script_path,
@@ -80,6 +81,7 @@ pub async fn live_loop(
         exchange_trading,
         risk_guard,
         status,
+        feed,
     )
     .await;
     match &result {
@@ -88,6 +90,24 @@ pub async fn live_loop(
     }
     flush_status(status);
     result
+}
+
+/// Candle length to trade on plus already-closed candles that preload the
+/// indicators (empty when the exchange offers no history).
+#[derive(Debug, Clone, Default)]
+pub struct FeedSpec {
+    pub interval: String,
+    pub warmup: Vec<Candle>,
+}
+
+impl FeedSpec {
+    /// Live-only feed: no preload.
+    pub fn live(interval: &str) -> Self {
+        Self {
+            interval: interval.to_string(),
+            warmup: Vec::new(),
+        }
+    }
 }
 
 /// Writes the snapshot; a failed write is logged and never stops trading.
@@ -107,6 +127,7 @@ async fn run_loop(
     exchange_trading: impl ExchangeTrading,
     risk_guard: &mut RiskGuard,
     status: &mut StatusWriter,
+    feed: FeedSpec,
 ) -> Result<(), LiveLoopError> {
     // Validate network (testnet-first, mainnet requires explicit opt-in)
     if network == Network::Mainnet {
@@ -128,17 +149,28 @@ async fn run_loop(
 
     // Subscribe to candle stream
     let mut candle_rx = exchange_stream
-        .subscribe_candles(symbol, "1m")
+        .subscribe_candles(symbol, &feed.interval)
         .await
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))?;
 
     // Initialize candle buffer for script evaluation
-    let mut candle_buffer: Vec<Candle> = Vec::new();
+    let mut candle_buffer: Vec<Candle> = feed.warmup;
+    for candle in &candle_buffer {
+        status.record_candle(candle, "hold");
+    }
+    flush_status(status);
     // Base quantity held from our own orders (long-only spot).
     let mut position = 0.0_f64;
 
     // Main event loop: process each candle as it arrives
     while let Some(candle) = candle_rx.recv().await {
+        // A bar can arrive both in the preload and on the stream: skip repeats.
+        if candle_buffer
+            .last()
+            .is_some_and(|last| candle.timestamp_ms <= last.timestamp_ms)
+        {
+            continue;
+        }
         candle_buffer.push(candle.clone());
         trace!("Evaluating candle: {:?}", candle);
 
