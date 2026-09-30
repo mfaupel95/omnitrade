@@ -1,0 +1,2 @@
+if close() > highest(20) && prev(close()) <= prev(highest(20)) { stop_loss(close() * 0.95); take_profit(close() * 1.10); buy() }
+if close() < lowest(20) && prev(close()) >= prev(lowest(20)) { stop_loss(close() * 1.05); take_profit(close() * 0.90); sell() }

@@ -1,0 +1,2 @@
+if ema(12) > ema(26) && prev(ema(12)) <= prev(ema(26)) { stop_loss(close() * 0.975); take_profit(close() * 1.05); buy() }
+if ema(12) < ema(26) && prev(ema(12)) >= prev(ema(26)) { stop_loss(close() * 1.025); take_profit(close() * 0.95); sell() }

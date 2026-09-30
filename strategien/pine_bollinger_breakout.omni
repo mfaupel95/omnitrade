@@ -1,0 +1,2 @@
+if close() > bb_upper(20, 2) && prev(close()) <= prev(bb_upper(20, 2)) { stop_loss(close() * 0.96); take_profit(close() * 1.08); buy() }
+if close() < bb_lower(20, 2) && prev(close()) >= prev(bb_lower(20, 2)) { stop_loss(close() * 1.04); take_profit(close() * 0.92); sell() }

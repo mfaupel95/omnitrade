@@ -1,0 +1,2 @@
+if rsi(14) > 30 && prev(rsi(14)) <= 30 { stop_loss(close() * 0.96); take_profit(close() * 1.04); buy() }
+if rsi(14) > 55 && prev(rsi(14)) <= 55 { sell() }

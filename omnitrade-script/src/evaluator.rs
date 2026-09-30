@@ -362,6 +362,19 @@ impl Evaluator {
                 }
                 Ok(sum / period as f64)
             }
+            // prev(expr): der Ausdruck auf der Kerzenreihe ohne die letzte Kerze.
+            // So laesst sich ein Kreuzen schreiben: a > b && prev(a) <= prev(b).
+            "prev" => {
+                if args.len() != 1 {
+                    return Err(ScriptError::EvalError {
+                        message: "prev() expects 1 argument".to_string(),
+                    });
+                }
+                if candles.len() < 2 {
+                    return Err(short(name, candles));
+                }
+                self.eval_expr(&args[0], &candles[..candles.len() - 1])
+            }
             "macd" | "macd_signal" | "macd_hist" => {
                 let a = self.eval_args(name, args, 3, candles)?;
                 let (fast, slow, sig) = (a[0] as usize, a[1] as usize, a[2] as usize);
@@ -703,6 +716,26 @@ mod tests {
         let mut evaluator = Evaluator::new();
         assert_eq!(evaluator.evaluate(&stmts, &candles).unwrap(), Signal::Buy);
         let bad = parse(&tokenize("if adx(14, 3) > 1 { buy() }").unwrap()).unwrap();
+        assert!(Evaluator::new().evaluate(&bad, &candles).is_err());
+    }
+
+    #[test]
+    fn test_prev_detects_crossover() {
+        // Kurs 10,10,10,20: nur auf der letzten Kerze kreuzt close ueber 15.
+        let candles = helper_candles(&[10.0, 10.0, 10.0, 20.0]);
+        let code = "if close() > 15 && prev(close()) <= 15 { buy() }";
+        let stmts = parse(&tokenize(code).unwrap()).unwrap();
+        assert_eq!(
+            Evaluator::new().evaluate(&stmts, &candles).unwrap(),
+            Signal::Buy
+        );
+        // Eine Kerze spaeter ist der Kurs schon drueber: kein Kreuzen mehr.
+        let candles = helper_candles(&[10.0, 10.0, 20.0, 20.0]);
+        assert_eq!(
+            Evaluator::new().evaluate(&stmts, &candles).unwrap(),
+            Signal::Hold
+        );
+        let bad = parse(&tokenize("if prev(1, 2) > 0 { buy() }").unwrap()).unwrap();
         assert!(Evaluator::new().evaluate(&bad, &candles).is_err());
     }
 }

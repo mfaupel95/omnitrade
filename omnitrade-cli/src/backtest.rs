@@ -187,6 +187,9 @@ fn run_backtest_with_script_and_candles(
     let (mut order_id, mut total_trades, mut wins) = (1u64, 0usize, 0usize);
     let (mut peak_equity, mut max_dd) = (cfg.initial_balance, 0.0f64);
     let mut eval = Evaluator::new();
+    // OMNI_LONG_ONLY=1: wie der Live-Lauf (Spot) - sell() schliesst nur die
+    // Long-Position, eroeffnet aber keine Short-Gegenposition.
+    let long_only = std::env::var("OMNI_LONG_ONLY").is_ok();
     let sym = if cfg.symbol.is_empty() {
         "BTCUSDT"
     } else {
@@ -331,7 +334,7 @@ fn run_backtest_with_script_and_candles(
                 }
                 (long_stop, long_take, long_trail) = (None, None, None);
                 long_trail_hi = f64::NEG_INFINITY;
-                if !has_short {
+                if !has_short && !long_only {
                     execute_order(&mut acc, &mut eng, order_id, sym, Side::Sell, qty, c)?;
                     order_id += 1;
                     let intent = eval.current_intent();
@@ -356,7 +359,7 @@ fn run_backtest_with_script_and_candles(
                     .map(|pos| pos.entry_price)
                     .unwrap_or(c.close);
             }
-            Signal::Sell if !has_short => {
+            Signal::Sell if !has_short && !long_only => {
                 execute_order(&mut acc, &mut eng, order_id, sym, Side::Sell, qty, c)?;
                 order_id += 1;
                 let intent = eval.current_intent();
