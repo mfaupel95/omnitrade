@@ -203,10 +203,7 @@ async fn run_loop(
                 } else {
                     order_req.quantity
                 };
-                position = match side {
-                    Side::Buy => position + filled,
-                    Side::Sell => (position - filled).max(0.0),
-                };
+                position = next_position(side, position, filled);
                 status.record_order(signal_name, order_req.quantity, candle.close, outcome, "");
             }
             Err(e) => {
@@ -242,6 +239,15 @@ const QTY_STEP: f64 = 1e-8;
 const SELL_SHARE: f64 = 0.998;
 
 /// Order quantity for a long-only spot strategy, rounded down to `QTY_STEP`.
+/// Position after a filled order. A sell closes the position; the fee-buffer
+/// remainder is dust and must not be sold again (below OKX's minimum size).
+fn next_position(side: Side, position: f64, filled: f64) -> f64 {
+    match side {
+        Side::Buy => position + filled,
+        Side::Sell => 0.0,
+    }
+}
+
 /// Buy spends `capital` only when flat; sell closes an open position.
 /// `None` means: no order for this signal.
 fn order_quantity(side: Side, position: f64, capital: f64, price: f64) -> Option<f64> {
@@ -343,6 +349,15 @@ mod tests {
         let s = order_quantity(Side::Sell, 0.01, 1000.0, 80_000.0).unwrap();
         assert!((s - 0.00998).abs() < 1e-12, "{s}");
         assert_eq!(order_quantity(Side::Buy, 0.0, 1000.0, 0.0), None);
+    }
+
+    #[test]
+    fn test_sell_closes_position_and_leaves_no_dust_order() {
+        let pos = next_position(Side::Buy, 0.0, 0.00599067);
+        assert_eq!(next_position(Side::Buy, 0.0, 0.5), 0.5);
+        let after = next_position(Side::Sell, pos, pos * 0.998);
+        assert_eq!(after, 0.0);
+        assert_eq!(order_quantity(Side::Sell, after, 500.0, 83_000.0), None);
     }
 
     #[test]
