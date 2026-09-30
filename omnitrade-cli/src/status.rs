@@ -5,6 +5,7 @@
 //! is no socket and no control channel. Each write goes to `PATH.tmp` first and
 //! is then renamed over `PATH`, so a reader never sees a half-written file.
 
+use omnitrade_core::Candle;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs;
@@ -14,6 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Number of recent order events kept in the snapshot.
 const MAX_ORDERS: usize = 20;
+
+/// Number of recent closed candles kept in the snapshot (for charts).
+const MAX_CANDLES: usize = 300;
 
 /// Current version of the snapshot layout. Bump on incompatible changes.
 pub const SCHEMA: u32 = 1;
@@ -29,6 +33,17 @@ pub struct OrderEvent {
     pub outcome: String,
     /// Rejection or exchange message, empty if accepted.
     pub detail: String,
+}
+
+/// One closed candle as written to the snapshot.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CandleRow {
+    pub time_ms: u64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
 }
 
 /// The document written to the status file.
@@ -56,6 +71,8 @@ pub struct LiveStatus {
     pub net_quantity: f64,
     pub last_error: String,
     pub recent_orders: VecDeque<OrderEvent>,
+    /// Last closed candles, oldest first (additive field, schema unchanged).
+    pub recent_candles: VecDeque<CandleRow>,
 }
 
 fn now_ms() -> u64 {
@@ -104,6 +121,7 @@ impl StatusWriter {
                 net_quantity: 0.0,
                 last_error: String::new(),
                 recent_orders: VecDeque::new(),
+                recent_candles: VecDeque::new(),
             },
         }
     }
@@ -122,12 +140,23 @@ impl StatusWriter {
         self.status.last_error = message.to_string();
     }
 
-    pub fn record_candle(&mut self, close: f64, open_time_ms: u64, signal: &str) {
+    pub fn record_candle(&mut self, candle: &Candle, signal: &str) {
         self.status.state = "running".to_string();
         self.status.candles_seen += 1;
-        self.status.last_close = Some(close);
-        self.status.last_candle_ms = Some(open_time_ms);
+        self.status.last_close = Some(candle.close);
+        self.status.last_candle_ms = Some(candle.timestamp_ms);
         self.status.last_signal = signal.to_string();
+        if self.status.recent_candles.len() == MAX_CANDLES {
+            self.status.recent_candles.pop_front();
+        }
+        self.status.recent_candles.push_back(CandleRow {
+            time_ms: candle.timestamp_ms,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+        });
     }
 
     pub fn record_order(
@@ -203,7 +232,10 @@ mod tests {
             "s.omni",
             1000.0,
         );
-        w.record_candle(60000.0, 1_700_000_000_000, "buy");
+        w.record_candle(
+            &Candle::new(1_700_000_000_000, 59900.0, 60100.0, 59800.0, 60000.0, 2.5),
+            "buy",
+        );
         w.record_order("buy", 1.0, 60000.0, "filled", "");
         w.flush().unwrap();
 
@@ -217,6 +249,8 @@ mod tests {
         assert_eq!(value["orders_placed"], 1);
         assert_eq!(value["net_quantity"], 1.0);
         assert_eq!(value["recent_orders"][0]["outcome"], "filled");
+        assert_eq!(value["recent_candles"][0]["close"], 60000.0);
+        assert_eq!(value["recent_candles"][0]["time_ms"], 1_700_000_000_000u64);
         assert!(!path.with_extension("json.tmp").exists());
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -242,6 +276,18 @@ mod tests {
         let s = w.status();
         assert_eq!(s.recent_orders.len(), MAX_ORDERS);
         assert_eq!(s.recent_orders.front().unwrap().price, 5.0);
+    }
+
+    #[test]
+    fn test_recent_candles_are_capped() {
+        let mut w = StatusWriter::new(None, "okx", "BTCUSDT", "testnet", "s.omni", 500.0);
+        for i in 0..(MAX_CANDLES + 5) {
+            let p = i as f64;
+            w.record_candle(&Candle::new(i as u64, p, p, p, p, 1.0), "hold");
+        }
+        let s = w.status();
+        assert_eq!(s.recent_candles.len(), MAX_CANDLES);
+        assert_eq!(s.recent_candles.front().unwrap().time_ms, 5);
     }
 
     #[test]

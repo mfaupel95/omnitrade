@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use omnitrade_core::{Candle, Position};
 use omnitrade_engine::L2OrderBook;
 
+use crate::feed::StatusDoc;
+
 /// Thread-safe state container storing passive UI snapshots of engine data.
 #[derive(Debug, Clone)]
 pub struct UIState {
@@ -20,6 +22,10 @@ pub struct UIState {
     pub total_pnl: f64,
     /// Connection status indicator.
     pub connected: bool,
+    /// Latest snapshot from `omnitrade live --status-file`, if readable.
+    pub status: Option<StatusDoc>,
+    /// Why the status feed is not delivering (missing or bad file).
+    pub feed_error: Option<String>,
 }
 
 impl UIState {
@@ -32,7 +38,14 @@ impl UIState {
             account_balance: 0.0,
             total_pnl: 0.0,
             connected: false,
+            status: None,
+            feed_error: None,
         }
+    }
+
+    /// Replaces the whole candle history of a symbol.
+    pub fn set_candles(&mut self, symbol: &str, candles: Vec<Candle>) {
+        self.candles.insert(symbol.to_string(), candles);
     }
 
     /// Appends a new candle snapshot for a given symbol.

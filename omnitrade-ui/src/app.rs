@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use omnitrade_engine::L2OrderBook;
 
+use crate::feed;
 use crate::state::UIState;
 use crate::widgets::chart::CandleChartWidget;
 use crate::widgets::depth::DepthWidget;
@@ -41,6 +42,10 @@ pub struct OmniTradeAppBehavior<'a> {
     pub depth: &'a DepthWidget,
     /// Optional snapshot of the active symbol's L2 order book.
     pub orderbook: Option<&'a L2OrderBook>,
+    /// Lines for the positions panel (status summary).
+    pub summary: &'a [String],
+    /// Lines for the console panel (recent orders, newest first).
+    pub orders: &'a [String],
 }
 
 impl<'a> egui_tiles::Behavior<PanelKind> for OmniTradeAppBehavior<'a> {
@@ -62,14 +67,27 @@ impl<'a> egui_tiles::Behavior<PanelKind> for OmniTradeAppBehavior<'a> {
                 self.depth.show(ui, self.orderbook);
             }
             PanelKind::Positions => {
-                ui.label("Positions Panel (Placeholder)");
+                show_lines(ui, self.summary, "no status yet");
             }
             PanelKind::Console => {
-                ui.label("Console Panel (Placeholder)");
+                show_lines(ui, self.orders, "no orders yet");
             }
         }
         egui_tiles::UiResponse::None
     }
+}
+
+/// Renders text lines, or a hint when there are none.
+fn show_lines(ui: &mut egui::Ui, lines: &[String], empty: &str) {
+    if lines.is_empty() {
+        ui.weak(empty);
+        return;
+    }
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for line in lines {
+            ui.monospace(line);
+        }
+    });
 }
 
 /// Main `omnitrade` application state holding UI tree and sub-widgets.
@@ -85,12 +103,14 @@ pub struct OmniTradeApp {
 }
 
 impl OmniTradeApp {
-    /// Creates a new `OmniTradeApp` initialized with default tiles (`Chart` & `OrderBook`).
+    /// Creates a new `OmniTradeApp`: chart on the left, positions above console on the right.
     pub fn new(state: Arc<RwLock<UIState>>) -> Self {
         let mut tiles = egui_tiles::Tiles::default();
         let chart_pane = tiles.insert_pane(PanelKind::Chart);
-        let book_pane = tiles.insert_pane(PanelKind::OrderBook);
-        let root = tiles.insert_horizontal_tile(vec![chart_pane, book_pane]);
+        let positions_pane = tiles.insert_pane(PanelKind::Positions);
+        let console_pane = tiles.insert_pane(PanelKind::Console);
+        let side = tiles.insert_vertical_tile(vec![positions_pane, console_pane]);
+        let root = tiles.insert_horizontal_tile(vec![chart_pane, side]);
         let tree = egui_tiles::Tree::new("omnitrade_tile_tree", root, tiles);
 
         Self {
@@ -104,25 +124,38 @@ impl OmniTradeApp {
 
 impl eframe::App for OmniTradeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        const ACTIVE_SYMBOL: &str = "BTCUSDT";
-
         let mut current_orderbook = None;
+        let mut summary = Vec::new();
+        let mut orders = Vec::new();
 
         let guard = self
             .state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let candles = guard.latest_candles(ACTIVE_SYMBOL, 100).to_vec();
+        let symbol = guard
+            .status
+            .as_ref()
+            .map_or_else(|| "BTCUSDT".to_string(), |s| s.symbol.clone());
+        let candles = guard.latest_candles(&symbol, 100).to_vec();
         self.chart.set_candles(candles);
-        if let Some(book) = guard.orderbook.get(ACTIVE_SYMBOL) {
+        if let Some(book) = guard.orderbook.get(&symbol) {
             current_orderbook = Some(book.clone());
+        }
+        if let Some(doc) = &guard.status {
+            summary = feed::summary_lines(doc);
+            orders = feed::order_lines(doc);
+        }
+        if let Some(err) = &guard.feed_error {
+            summary.insert(0, format!("feed: {err}"));
         }
 
         let mut behavior = OmniTradeAppBehavior {
             chart: &mut self.chart,
             depth: &self.depth,
             orderbook: current_orderbook.as_ref(),
+            summary: &summary,
+            orders: &orders,
         };
 
         egui::CentralPanel::default().show(ctx, |ui| {

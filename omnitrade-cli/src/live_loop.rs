@@ -147,7 +147,7 @@ async fn run_loop(
             Ok(sig) => sig,
             Err(e) => {
                 warn!("Script evaluation error for {}: {}", symbol, e);
-                status.record_candle(candle.close, candle.timestamp_ms, "hold");
+                status.record_candle(&candle, "hold");
                 flush_status(status);
                 continue;
             }
@@ -157,7 +157,7 @@ async fn run_loop(
             omnitrade_script::Signal::Sell => "sell",
             omnitrade_script::Signal::Hold => "hold",
         };
-        status.record_candle(candle.close, candle.timestamp_ms, signal_name);
+        status.record_candle(&candle, signal_name);
 
         // Skip if no signal
         if signal == omnitrade_script::Signal::Hold {

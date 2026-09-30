@@ -6,6 +6,8 @@ use omnitrade_ui::{OmniTradeApp, UIState};
 
 fn main() -> eframe::Result<()> {
     let state = Arc::new(RwLock::new(UIState::new()));
+    let path = omnitrade_ui::feed::resolve_path(std::env::args().nth(1));
+    omnitrade_ui::feed::spawn_poller(path, Arc::clone(&state));
     let app = OmniTradeApp::new(state);
 
     let options = eframe::NativeOptions {
