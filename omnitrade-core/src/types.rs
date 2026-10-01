@@ -252,6 +252,29 @@ impl Position {
         self.entry_price * self.quantity
     }
 
+    /// Signed market value of the position at its last mark.
+    ///
+    /// `notional_value()` is the ENTRY value and carries no sign: a short is
+    /// booked as cash inflow in `AccountState::apply_sell_fill`, so its market
+    /// value has to be negative or the account would count the borrowed
+    /// inventory as an asset. With `unrealized_pnl` (set by `mark_to_market`)
+    /// this is `+/- quantity * current_price`:
+    ///
+    ///   Long:  entry*qty + (price-entry)*qty = price*qty
+    ///   Short: -entry*qty + (entry-price)*qty = -price*qty
+    ///
+    /// Before the first mark `unrealized_pnl` is 0, so the value is the entry
+    /// notional - correct at the moment of the fill.
+    #[inline]
+    #[must_use]
+    pub fn market_value(&self) -> f64 {
+        let vorzeichen = match self.side {
+            Side::Buy => 1.0,
+            Side::Sell => -1.0,
+        };
+        vorzeichen * self.notional_value() + self.unrealized_pnl
+    }
+
     /// Updates unrealized PnL based on the current market price.
     pub fn mark_to_market(&mut self, current_price: f64) {
         let price_delta = current_price - self.entry_price;

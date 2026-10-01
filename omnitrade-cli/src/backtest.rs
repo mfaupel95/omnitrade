@@ -717,4 +717,39 @@ mod tests {
         assert!((result.win_rate - 1.0).abs() < f64::EPSILON);
         assert!((result.final_balance - (config.initial_balance + 50.0)).abs() < 1e-6);
     }
+
+    /// T-287/T-292: eine offene Position ist kein Verlust.
+    ///
+    /// `apply_buy_fill` zieht den Nennwert VOLL vom Guthaben ab. Wer die
+    /// Equity als `balance + unrealized_pnl` rechnet, sieht beim Einstieg
+    /// einen Einbruch um die halbe Kontogroesse und einen Drawdown, den es
+    /// nie gab - gemessen am 01.10.2026 an adx_macd/BTC-1h: 75,18 % statt
+    /// 8,15 %, bei unveraendertem PnL und unveraenderter Rundenzahl.
+    #[test]
+    fn test_drawdown_zaehlt_den_positionswert_mit() {
+        let candles = vec![
+            Candle::new(1000, 500.0, 505.0, 495.0, 500.0, 500.0),
+            Candle::new(2000, 520.0, 525.0, 515.0, 520.0, 600.0),
+            Candle::new(3000, 540.0, 545.0, 535.0, 540.0, 700.0),
+            Candle::new(4000, 560.0, 565.0, 555.0, 560.0, 800.0),
+        ];
+        let cfg = BacktestConfig::new(
+            PathBuf::from("dummy.omni"),
+            PathBuf::from("dummy.csv"),
+            1000.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        // Long bei 500 = halbes Konto, danach nur steigende Kurse.
+        let script = "if close() < 510 { buy() }\n";
+        let result = run_backtest_with_script_and_candles(script, &candles, &cfg)
+            .expect("backtest must complete");
+        assert_eq!(result.total_trades, 1);
+        assert!((result.total_pnl - 60.0).abs() < 1e-6);
+        assert_eq!(
+            result.max_drawdown, 0.0,
+            "steigende Kurse koennen keinen Drawdown ergeben - der Einbruch waere der Positionswert"
+        );
+    }
 }

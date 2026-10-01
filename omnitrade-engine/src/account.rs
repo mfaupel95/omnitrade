@@ -204,11 +204,19 @@ impl AccountState {
         }
     }
 
-    /// Calculates total account equity (balance + unrealized PnL sum).
+    /// Calculates total account equity: cash + market value of open positions.
+    ///
+    /// NICHT `balance + unrealized_pnl`: `apply_buy_fill` zieht den Nennwert
+    /// VOLL vom Guthaben ab (und `apply_sell_fill` bucht ihn beim Short voll
+    /// zu). Waehrend einer offenen Long-Position steht das Guthaben also nahe
+    /// null, der Positionswert liegt aber im Bestand - ohne ihn faellt die
+    /// Equity beim Einstieg auf die Hoehe des unrealisierten PnL und der
+    /// Drawdown zeigt 70-90 % auf einer Kurve, die nie gefallen ist
+    /// (gemessen 01.10.2026, T-287/T-292).
     #[must_use]
     pub fn total_equity(&self) -> f64 {
-        let unrealized_sum: f64 = self.positions.values().map(|p| p.unrealized_pnl).sum();
-        self.balance + unrealized_sum
+        let positionswert: f64 = self.positions.values().map(|p| p.market_value()).sum();
+        self.balance + positionswert
     }
 
     /// Calculates total PnL since account creation.
@@ -253,5 +261,57 @@ mod tests {
         assert!(acc.get_position("BTCUSDT", Side::Buy).is_some());
         assert!(acc.get_position("BTCUSDT", Side::Sell).is_some());
         assert_eq!(acc.get_all_positions_for_symbol("BTCUSDT").len(), 2);
+    }
+
+    /// T-287/T-292: das Guthaben allein ist nach einem Kauf fast leer - die
+    /// Equity darf trotzdem nicht einbrechen, solange die Position steht.
+    #[test]
+    fn test_equity_haelt_den_positionswert() {
+        let mut acc = AccountState::new(100_000.0).expect("account");
+        let buy = OrderFill::new(
+            1,
+            "BTCUSDT".to_string(),
+            Side::Buy,
+            50_000.0,
+            1.0,
+            0.0,
+            "USDT".to_string(),
+            1000,
+            false,
+        );
+        acc.apply_fill(&buy).expect("buy");
+        assert_eq!(acc.balance, 50_000.0, "Nennwert ist vom Guthaben weg");
+        assert_eq!(acc.total_equity(), 100_000.0, "Equity unveraendert beim Kauf");
+
+        // Kurs faellt 10 %: Equity folgt dem Marktwert, nicht dem Guthaben.
+        acc.update_unrealized_pnl("BTCUSDT", Side::Buy, 45_000.0)
+            .expect("mark");
+        assert_eq!(acc.total_equity(), 95_000.0);
+        assert_eq!(acc.total_pnl(), -5_000.0);
+    }
+
+    /// Ein Short ist ein Mittelzufluss im Guthaben - der Gegenwert muss als
+    /// NEGATIVER Positionswert gegengerechnet werden.
+    #[test]
+    fn test_equity_bei_short_zieht_den_positionswert_ab() {
+        let mut acc = AccountState::new(100_000.0).expect("account");
+        let sell = OrderFill::new(
+            1,
+            "BTCUSDT".to_string(),
+            Side::Sell,
+            50_000.0,
+            1.0,
+            0.0,
+            "USDT".to_string(),
+            1000,
+            false,
+        );
+        acc.apply_fill(&sell).expect("sell");
+        assert_eq!(acc.balance, 150_000.0, "Short bucht den Nennwert zu");
+        assert_eq!(acc.total_equity(), 100_000.0, "Equity unveraendert beim Short");
+
+        acc.update_unrealized_pnl("BTCUSDT", Side::Sell, 55_000.0)
+            .expect("mark");
+        assert_eq!(acc.total_equity(), 95_000.0, "Short verliert, wenn der Kurs steigt");
     }
 }
