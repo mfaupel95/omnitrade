@@ -20,15 +20,21 @@ pub mod binance;
 pub mod credentials;
 pub mod error;
 pub mod keystore;
+pub mod kraken;
+pub mod okx;
 pub mod trading;
 pub mod traits;
+pub mod venue;
 
 pub use binance::{
-    fetch_depth_snapshot, fetch_klines, BinanceClient, BinanceMarginClient, BinanceRestClient,
-    DepthSnapshot,
+    fetch_depth_snapshot, fetch_klines, fetch_symbol_filters, BinanceClient, BinanceMarginClient,
+    BinanceRestClient, DepthSnapshot, SymbolFilters,
 };
 pub use credentials::{ApiCredentials, Network};
 pub use error::ExchangeError;
 pub use keystore::Keystore;
+pub use kraken::{KrakenClient, KrakenRestClient};
+pub use okx::{OkxClient, OkxRestClient};
 pub use trading::{Account, AccountBalance, ExchangeTrading, OrderRequest};
 pub use traits::{DepthUpdate, ExchangeInfo, ExchangeStream};
+pub use venue::Exchange;

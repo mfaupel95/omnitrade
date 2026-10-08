@@ -5,7 +5,7 @@
 //! and places orders via the exchange trading interface.
 
 use omnitrade_core::{Candle, OrderStatus, Side, TimeInForce};
-use omnitrade_exchange::{ExchangeStream, ExchangeTrading, Network, OrderRequest};
+use omnitrade_exchange::{Account, ExchangeStream, ExchangeTrading, Network, OrderRequest};
 use omnitrade_risk::guard::RiskGuard;
 use omnitrade_script::compile_and_run;
 use std::fs;
@@ -20,7 +20,11 @@ use crate::kill_switch;
 const MAX_CANDLE_BUFFER: usize = 500;
 
 /// Quote-Währung, deren Bestand als Konto-Equity für den RiskGuard dient.
-const QUOTE_ASSET: &str = "USDT";
+/// Quote-Währungen für Symbole ohne Trennzeichen (`BTCUSDT`), längere zuerst, damit
+/// z. B. `USDT` vor `USD` und `BNB` erkannt wird.
+const KNOWN_QUOTES: [&str; 10] = [
+    "FDUSD", "USDT", "USDC", "BUSD", "TUSD", "USD", "EUR", "BTC", "ETH", "BNB",
+];
 
 /// Errors that can occur during live trading loop execution.
 #[derive(Debug, Error)]
@@ -57,7 +61,14 @@ pub struct LiveConfig<'a> {
     pub order_quantity: f64,
     /// Flag-Datei des Not-Aus; ist sie gesetzt, stoppt die Schleife.
     pub kill_file: &'a Path,
+    /// Deckel für die Position, die dieser Lauf selbst aufbaut (Quote-Währung).
+    /// Auf Mainnet Pflicht und höchstens [`MAINNET_HARD_CAP`].
+    pub max_notional: Option<f64>,
 }
+
+/// Fest verdrahteter Höchstwert des Deckels auf Mainnet (Quote-Währung, z. B. USD).
+/// Er lässt sich nur per Code-Änderung anheben, nie per Argument.
+pub const MAINNET_HARD_CAP: f64 = 100.0;
 
 /// Main async actor-style loop for live trading.
 ///
@@ -80,14 +91,23 @@ pub async fn live_loop(
         initial_capital,
         order_quantity,
         kill_file,
+        max_notional,
     } = *config;
 
-    // Validate network (testnet-first, mainnet requires explicit opt-in)
-    if network == Network::Mainnet {
-        return Err(LiveLoopError::NetworkError(
-            "Mainnet trading requires additional Phase 3 safety gates".to_string(),
-        ));
+    // Mainnet nur mit gültigem Deckel (testnet-first, echtes Geld braucht eine Grenze).
+    if network == Network::Mainnet && !valid_mainnet_cap(max_notional) {
+        return Err(LiveLoopError::NetworkError(format!(
+            "Mainnet trading requires a max notional between 0 and {MAINNET_HARD_CAP}"
+        )));
     }
+    if let Some(cap) = max_notional {
+        if !cap.is_finite() || cap <= 0.0 {
+            return Err(LiveLoopError::NetworkError(format!(
+                "Invalid max notional: {cap}"
+            )));
+        }
+    }
+    let mut exposure = max_notional.map(ExposureLimit::new);
 
     // Load and validate script file
     let script_content = fs::read_to_string(script_path)?;
@@ -167,12 +187,13 @@ pub async fn live_loop(
         info!("Placing order: {:?}", order_req);
 
         // Place order and check risk guard
-        match place_order_with_risk_check(
+        match place_order_guarded(
             &exchange_trading,
             risk_guard,
             &order_req,
             candle.close,
             initial_capital,
+            exposure.as_mut(),
         )
         .await
         {
@@ -230,6 +251,92 @@ async fn halt_trading(
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))
 }
 
+/// Zerlegt ein Börsensymbol in (Basis, Quote): `BTC-USDT`, `BTC/USD` oder `BTCUSDT`.
+pub(crate) fn split_symbol(symbol: &str) -> Option<(String, String)> {
+    let upper = symbol.to_uppercase();
+    if let Some((base, quote)) = upper.split_once(['-', '/']) {
+        return (!base.is_empty() && !quote.is_empty() && !quote.contains(['-', '/']))
+            .then(|| (base.to_string(), quote.to_string()));
+    }
+    KNOWN_QUOTES.iter().find_map(|quote| {
+        upper
+            .strip_suffix(quote)
+            .filter(|base| !base.is_empty())
+            .map(|base| (base.to_string(), (*quote).to_string()))
+    })
+}
+
+/// Eigenkapital des Handelspaars: Quote-Bestand plus Basis-Bestand zum aktuellen Preis
+/// (jeweils frei + gesperrt). Nur das Quote-Guthaben zu zählen ließe jeden Kauf wie
+/// einen Verlust in Höhe des Kaufpreises aussehen.
+pub(crate) fn pair_equity(account: &Account, base: &str, quote: &str, price: f64) -> f64 {
+    let total = |asset: &str| {
+        account
+            .balances
+            .get(asset)
+            .map_or(0.0, |b| b.free + b.locked)
+    };
+    total(quote) + total(base) * price
+}
+
+/// Prüft einen Positionsdeckel für die Position, die ein Lauf selbst aufbaut.
+///
+/// Bestände, die schon vor dem Lauf im Konto lagen, zählen nicht dazu und werden nie
+/// verkauft: Beim ersten Check wird der Basis-Bestand als Ausgangspunkt gemerkt, der
+/// Lauf darf nur darüber hinaus kaufen und höchstens das Gekaufte wieder verkaufen.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExposureLimit {
+    cap: f64,
+    start_base: Option<f64>,
+}
+
+impl ExposureLimit {
+    pub(crate) fn new(cap: f64) -> Self {
+        Self {
+            cap,
+            start_base: None,
+        }
+    }
+
+    /// `held_base` ist der aktuelle Gesamtbestand (frei + gesperrt) der Basis-Währung.
+    pub(crate) fn check(
+        &mut self,
+        side: Side,
+        quantity: f64,
+        price: f64,
+        held_base: f64,
+    ) -> Result<(), String> {
+        let start = *self.start_base.get_or_insert(held_base);
+        let run_base = (held_base - start).max(0.0);
+        match side {
+            Side::Buy => {
+                let after = (run_base + quantity) * price;
+                if after > self.cap {
+                    return Err(format!(
+                        "Positionsdeckel überschritten: {after:.2} > {:.2}",
+                        self.cap
+                    ));
+                }
+            }
+            Side::Sell => {
+                // Toleranz 1 % der Ordermenge: Gebühren in der Basis-Währung lassen den
+                // Bestand leicht unter der gekauften Menge liegen.
+                if quantity > run_base + quantity * 0.01 {
+                    return Err(format!(
+                        "Verkauf {quantity} übersteigt die in diesem Lauf gekaufte Menge {run_base}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `true`, wenn der Deckel für Mainnet gesetzt, endlich, positiv und unter dem Höchstwert liegt.
+pub(crate) fn valid_mainnet_cap(cap: Option<f64>) -> bool {
+    cap.is_some_and(|c| c.is_finite() && c > 0.0 && c <= MAINNET_HARD_CAP)
+}
+
 /// Helper: Place order after passing risk guard checks.
 ///
 /// Creates a mock Order from the request, checks it against RiskGuard,
@@ -240,6 +347,26 @@ pub(crate) async fn place_order_with_risk_check(
     order_req: &OrderRequest,
     current_price: f64,
     initial_capital: f64,
+) -> Result<omnitrade_core::Order, LiveLoopError> {
+    place_order_guarded(
+        exchange_trading,
+        risk_guard,
+        order_req,
+        current_price,
+        initial_capital,
+        None,
+    )
+    .await
+}
+
+/// Wie [`place_order_with_risk_check`], zusätzlich mit optionalem Positionsdeckel.
+pub(crate) async fn place_order_guarded(
+    exchange_trading: &impl ExchangeTrading,
+    risk_guard: &mut RiskGuard,
+    order_req: &OrderRequest,
+    current_price: f64,
+    initial_capital: f64,
+    exposure: Option<&mut ExposureLimit>,
 ) -> Result<omnitrade_core::Order, LiveLoopError> {
     // Create mock order for risk checking
     let mock_order = omnitrade_core::Order {
@@ -285,18 +412,35 @@ pub(crate) async fn place_order_with_risk_check(
         }
     }
 
-    // Echter Kontostand (Quote-Währung) statt fester Startsumme, sonst bleiben
-    // Drawdown- und Tagesverlust-Limits wirkungslos. Schlägt der Abruf fehl,
-    // wird die Order abgelehnt (fail closed).
+    // Echter Kontostand statt fester Startsumme, sonst bleiben Drawdown- und
+    // Tagesverlust-Limits wirkungslos. Schlägt der Abruf fehl oder lässt sich das
+    // Symbol nicht zerlegen, wird die Order abgelehnt (fail closed).
+    if !current_price.is_finite() || current_price <= 0.0 {
+        return Err(LiveLoopError::RiskViolation(format!(
+            "ungültiger Preis {current_price} für die Eigenkapital-Bewertung"
+        )));
+    }
+    let (base, quote) = split_symbol(&order_req.symbol).ok_or_else(|| {
+        LiveLoopError::ExchangeError(format!(
+            "Symbol {} lässt sich nicht in Basis/Quote zerlegen",
+            order_req.symbol
+        ))
+    })?;
     let balances = exchange_trading
         .get_balance()
         .await
         .map_err(|e| LiveLoopError::ExchangeError(format!("Kontostand: {e}")))?;
-    let equity = balances
-        .balances
-        .get(QUOTE_ASSET)
-        .map(|b| b.free + b.locked)
-        .unwrap_or(0.0);
+    let equity = pair_equity(&balances, &base, &quote, current_price);
+
+    if let Some(limit) = exposure {
+        let held = balances
+            .balances
+            .get(&base)
+            .map_or(0.0, |b| b.free + b.locked);
+        limit
+            .check(order_req.side, order_req.quantity, current_price, held)
+            .map_err(LiveLoopError::RiskViolation)?;
+    }
     let account = SimpleAccount {
         initial: initial_capital,
         current: equity,
@@ -372,6 +516,8 @@ mod tests {
     /// Trading-Mock: konfigurierbarer Kontostand, protokolliert platzierte Orders.
     struct MockTrading {
         usdt: Option<f64>,
+        /// Gehaltene BTC (Basis-Bestand); 0 = kein Eintrag im Konto.
+        btc: f64,
         placed: Arc<Mutex<Vec<OrderRequest>>>,
         cancelled: Arc<Mutex<Vec<String>>>,
     }
@@ -428,12 +574,20 @@ mod tests {
 
         async fn get_balance(&self) -> Result<Account, ExchangeError> {
             match self.usdt {
-                Some(free) => Ok(Account {
-                    balances: HashMap::from([(
-                        "USDT".to_string(),
-                        AccountBalance { free, locked: 0.0 },
-                    )]),
-                }),
+                Some(free) => {
+                    let mut balances =
+                        HashMap::from([("USDT".to_string(), AccountBalance { free, locked: 0.0 })]);
+                    if self.btc > 0.0 {
+                        balances.insert(
+                            "BTC".to_string(),
+                            AccountBalance {
+                                free: self.btc,
+                                locked: 0.0,
+                            },
+                        );
+                    }
+                    Ok(Account { balances })
+                }
                 None => Err(ExchangeError::ChannelClosed),
             }
         }
@@ -445,9 +599,15 @@ mod tests {
         placed: Arc<Mutex<Vec<OrderRequest>>>,
         cancelled: Arc<Mutex<Vec<String>>>,
         kill: PathBuf,
+        cap: Option<f64>,
     }
 
     impl Harness {
+        fn with_cap(mut self, cap: f64) -> Self {
+            self.cap = Some(cap);
+            self
+        }
+
         fn new(name: &str, script: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "omnitrade-liveloop-{}-{name}.omni",
@@ -463,6 +623,7 @@ mod tests {
                     "omnitrade-liveloop-{}-{name}.kill",
                     std::process::id()
                 )),
+                cap: None,
             }
         }
 
@@ -484,6 +645,7 @@ mod tests {
             };
             let trading = MockTrading {
                 usdt,
+                btc: 0.0,
                 placed: self.placed.clone(),
                 cancelled: self.cancelled.clone(),
             };
@@ -495,6 +657,7 @@ mod tests {
                 initial_capital: 1000.0,
                 order_quantity: quantity,
                 kill_file: &self.kill,
+                max_notional: self.cap,
             };
             let mut guard = RiskGuard::testnet();
             live_loop(&config, stream, trading, &mut guard).await
@@ -675,5 +838,324 @@ mod tests {
             "file not found",
         ));
         assert!(err.to_string().contains("Script file error"));
+    }
+
+    fn trading_with(usdt: f64, btc: f64) -> MockTrading {
+        MockTrading {
+            usdt: Some(usdt),
+            btc,
+            placed: Arc::default(),
+            cancelled: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn bought_coins_do_not_look_like_a_drawdown_to_the_risk_guard() {
+        // Arrange: 5 % Drawdown-Limit, Referenzpreis 50_000.
+        let mut guard = RiskGuard::new(omnitrade_risk::RiskLimits::new(
+            1_000_000_000.0,
+            5.0,
+            1_000_000_000.0,
+        ));
+        let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
+
+        // Act: erste Order bei 10_000 USDT setzt die Spitze.
+        place_order_with_risk_check(
+            &trading_with(10_000.0, 0.0),
+            &mut guard,
+            &req,
+            50_000.0,
+            10_000.0,
+        )
+        .await
+        .expect("first order passes");
+        // Nach einem Kauf: 5_000 USDT + 0.1 BTC (= 5_000 USDT) bleiben 10_000 Eigenkapital.
+        let after_buy = place_order_with_risk_check(
+            &trading_with(5_000.0, 0.1),
+            &mut guard,
+            &req,
+            50_000.0,
+            10_000.0,
+        )
+        .await;
+
+        // Assert: ohne Bewertung der BTC sähe der Guard 50 % Drawdown und lehnte ab.
+        assert!(after_buy.is_ok(), "{after_buy:?}");
+    }
+
+    #[tokio::test]
+    async fn real_loss_is_still_blocked_after_valuing_holdings() {
+        // Arrange
+        let mut guard = RiskGuard::new(omnitrade_risk::RiskLimits::new(
+            1_000_000_000.0,
+            5.0,
+            1_000_000_000.0,
+        ));
+        let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
+        place_order_with_risk_check(
+            &trading_with(10_000.0, 0.0),
+            &mut guard,
+            &req,
+            50_000.0,
+            10_000.0,
+        )
+        .await
+        .expect("first order passes");
+
+        // Act: Preis fällt auf 40_000, 5_000 USDT + 0.1 BTC = 9_000, also 10 % Drawdown.
+        let res = place_order_with_risk_check(
+            &trading_with(5_000.0, 0.1),
+            &mut guard,
+            &req,
+            40_000.0,
+            10_000.0,
+        )
+        .await;
+
+        // Assert
+        assert!(
+            matches!(res, Err(LiveLoopError::RiskViolation(_))),
+            "{res:?}"
+        );
+    }
+
+    #[test]
+    fn split_symbol_handles_all_exchange_notations() {
+        let pair = |b: &str, q: &str| Some((b.to_string(), q.to_string()));
+        assert_eq!(split_symbol("BTCUSDT"), pair("BTC", "USDT"));
+        assert_eq!(split_symbol("btcusdc"), pair("BTC", "USDC"));
+        assert_eq!(split_symbol("ETHBTC"), pair("ETH", "BTC"));
+        assert_eq!(split_symbol("BNBUSDT"), pair("BNB", "USDT"));
+        assert_eq!(split_symbol("USDCUSDT"), pair("USDC", "USDT"));
+        assert_eq!(split_symbol("BTC-USDT"), pair("BTC", "USDT"));
+        assert_eq!(split_symbol("btc/usd"), pair("BTC", "USD"));
+        assert_eq!(split_symbol("BTCEUR"), pair("BTC", "EUR"));
+    }
+
+    #[test]
+    fn split_symbol_rejects_unsplittable_input() {
+        for bad in [
+            "",
+            "USDT",
+            "BTC-",
+            "-USDT",
+            "A-B-C",
+            "BTCXYZ",
+            "BTC/USD/EUR",
+        ] {
+            assert_eq!(split_symbol(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn pair_equity_values_base_holdings_at_price() {
+        // Arrange
+        let account = Account {
+            balances: HashMap::from([
+                (
+                    "USDT".to_string(),
+                    AccountBalance {
+                        free: 5_000.0,
+                        locked: 1_000.0,
+                    },
+                ),
+                (
+                    "BTC".to_string(),
+                    AccountBalance {
+                        free: 0.1,
+                        locked: 0.05,
+                    },
+                ),
+                (
+                    "ETH".to_string(),
+                    AccountBalance {
+                        free: 99.0,
+                        locked: 0.0,
+                    },
+                ),
+            ]),
+        };
+
+        // Act & Assert: fremde Assets (ETH) zählen nicht, gesperrte Bestände schon.
+        assert!((pair_equity(&account, "BTC", "USDT", 50_000.0) - 13_500.0).abs() < 1e-9);
+        assert!((pair_equity(&account, "SOL", "USDT", 50_000.0) - 6_000.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn invalid_price_or_symbol_is_rejected_fail_closed() {
+        // Arrange
+        let mut guard = RiskGuard::testnet();
+        let ok = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
+        let bad_symbol = OrderRequest::market("FOO".into(), Side::Buy, 0.0001);
+        let trading = trading_with(10_000.0, 0.0);
+
+        // Act & Assert
+        for price in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let res = place_order_with_risk_check(&trading, &mut guard, &ok, price, 1000.0).await;
+            assert!(
+                matches!(res, Err(LiveLoopError::RiskViolation(_))),
+                "{price}"
+            );
+        }
+        let res =
+            place_order_with_risk_check(&trading, &mut guard, &bad_symbol, 50_000.0, 1000.0).await;
+        assert!(
+            matches!(res, Err(LiveLoopError::ExchangeError(_))),
+            "{res:?}"
+        );
+        assert!(trading.placed.lock().expect("placed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn loss_limit_uses_equity_at_run_start_not_declared_capital() {
+        // Arrange: deklariertes Startkapital 10_000, das Konto hält aber 93_000.
+        let limits = omnitrade_risk::RiskLimits::new(1_000_000_000.0, 100.0, 2_000.0);
+        let mut guard = RiskGuard::new(limits).with_run_baseline();
+        let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
+        place_order_with_risk_check(
+            &trading_with(93_000.0, 0.0),
+            &mut guard,
+            &req,
+            50_000.0,
+            10_000.0,
+        )
+        .await
+        .expect("first order sets the baseline");
+
+        // Act: 3_000 Verlust seit Laufbeginn (> 2_000), obwohl 90_000 weit über 10_000 liegt.
+        let res = place_order_with_risk_check(
+            &trading_with(90_000.0, 0.0),
+            &mut guard,
+            &req,
+            50_000.0,
+            10_000.0,
+        )
+        .await;
+
+        // Assert
+        assert!(
+            matches!(res, Err(LiveLoopError::RiskViolation(_))),
+            "{res:?}"
+        );
+    }
+
+    #[test]
+    fn exposure_cap_limits_what_the_run_builds_up() {
+        // Arrange: Deckel 200, Preis 100 → höchstens 2 Einheiten Position aus diesem Lauf.
+        let mut limit = ExposureLimit::new(200.0);
+
+        // Act & Assert
+        assert!(limit.check(Side::Buy, 1.0, 100.0, 5.0).is_ok());
+        assert!(
+            limit.check(Side::Buy, 1.0, 100.0, 6.0).is_ok(),
+            "zweite Einheit: 200"
+        );
+        let over = limit.check(Side::Buy, 1.0, 100.0, 7.0);
+        assert!(
+            matches!(&over, Err(m) if m.contains("Positionsdeckel")),
+            "{over:?}"
+        );
+    }
+
+    #[test]
+    fn exposure_cap_ignores_preexisting_holdings_and_never_sells_them() {
+        // Arrange: das Konto hält schon 5 Einheiten, bevor der Lauf beginnt.
+        let mut limit = ExposureLimit::new(150.0);
+
+        // Act & Assert: Kaufen zählt ab dem Startbestand, nicht ab 0.
+        assert!(limit.check(Side::Buy, 1.0, 100.0, 5.0).is_ok());
+        // Verkaufen vor dem ersten Kauf: Lauf besitzt nichts, der Bestand bleibt tabu.
+        let mut fresh = ExposureLimit::new(150.0);
+        let sell = fresh.check(Side::Sell, 1.0, 100.0, 5.0);
+        assert!(
+            matches!(&sell, Err(m) if m.contains("übersteigt")),
+            "{sell:?}"
+        );
+        // Nach dem Kauf (Bestand 6) darf die gekaufte Einheit zurück, nicht mehr.
+        assert!(limit.check(Side::Sell, 1.0, 100.0, 6.0).is_ok());
+        assert!(limit.check(Side::Sell, 2.0, 100.0, 6.0).is_err());
+    }
+
+    #[test]
+    fn exposure_cap_sell_tolerates_fee_shortfall() {
+        // Arrange: 0.001 gekauft, Gebühr in der Basis → Bestand nur 0.000999.
+        let mut limit = ExposureLimit::new(1_000.0);
+        limit.check(Side::Buy, 0.001, 50_000.0, 1.0).expect("buy");
+
+        // Act & Assert
+        assert!(limit.check(Side::Sell, 0.001, 50_000.0, 1.000999).is_ok());
+    }
+
+    #[test]
+    fn mainnet_cap_validation() {
+        assert!(valid_mainnet_cap(Some(20.0)));
+        assert!(valid_mainnet_cap(Some(MAINNET_HARD_CAP)));
+        for bad in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(MAINNET_HARD_CAP + 0.01),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            assert!(!valid_mainnet_cap(bad), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mainnet_with_cap_above_hard_limit_is_rejected_before_any_exchange_call() {
+        // Arrange
+        let h = Harness::new("mainnet-over", BUY_BELOW_40K).with_cap(MAINNET_HARD_CAP + 1.0);
+
+        // Act
+        let result = h
+            .run(&[35000.0], Some(1000.0), Network::Mainnet, 0.001)
+            .await;
+
+        // Assert
+        assert!(matches!(result, Err(LiveLoopError::NetworkError(_))));
+        assert!(h.log.lock().expect("log").is_empty());
+    }
+
+    #[tokio::test]
+    async fn mainnet_with_valid_cap_runs_and_blocks_orders_over_the_cap() {
+        // Arrange: Deckel 20, Order 0.001 BTC @ 35000 = 35 > 20 → blockiert, kein Aufruf an die Börse.
+        let h = Harness::new("mainnet-cap", BUY_BELOW_40K).with_cap(20.0);
+
+        // Act
+        let result = h
+            .run(&[35000.0], Some(1000.0), Network::Mainnet, 0.001)
+            .await;
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            h.placed.lock().expect("placed").is_empty(),
+            "Order über Deckel darf nicht raus"
+        );
+    }
+
+    #[tokio::test]
+    async fn testnet_cap_allows_orders_within_the_cap() {
+        // Arrange: Deckel 50, Order 0.001 @ 35000 = 35 ≤ 50.
+        let h = Harness::new("testnet-cap", BUY_BELOW_40K).with_cap(50.0);
+
+        // Act
+        let result = h
+            .run(&[35000.0], Some(1000.0), Network::Testnet, 0.001)
+            .await;
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(h.placed.lock().expect("placed").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_positive_cap_is_rejected_even_on_testnet() {
+        let h = Harness::new("cap-zero", BUY_BELOW_40K).with_cap(0.0);
+        let result = h
+            .run(&[35000.0], Some(1000.0), Network::Testnet, 0.001)
+            .await;
+        assert!(matches!(result, Err(LiveLoopError::NetworkError(_))));
     }
 }
