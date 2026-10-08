@@ -6,6 +6,8 @@
 mod args;
 mod backtest;
 mod commands;
+mod grid_loop;
+mod kill_switch;
 mod live_loop;
 
 use args::{CliArgs, Commands};
@@ -56,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             symbol,
             network,
             initial_capital,
+            quantity,
         } => {
             let capital = initial_capital.unwrap_or(1000.0);
             handle_live(
@@ -64,11 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &symbol,
                 &network,
                 capital,
+                quantity,
             )
             .await?;
         }
-        Commands::Kill => {
-            handle_kill()?;
+        Commands::Kill { reset } => {
+            handle_kill(reset, &kill_switch::default_path())?;
         }
     }
 
