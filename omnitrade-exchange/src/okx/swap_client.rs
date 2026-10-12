@@ -33,8 +33,18 @@ pub(crate) fn parse_swap_position(
         let contracts = optional_number(item, "pos")?;
         snapshot.base_qty += inst.contracts_to_base(contracts);
         snapshot.unrealized_pnl += optional_number(item, "upl")?;
+        if contracts != 0.0 && snapshot.liq_price.is_none() {
+            snapshot.liq_price = optional_price(item, "liqPx")?;
+            snapshot.mark_price = optional_price(item, "markPx")?;
+        }
     }
     Ok(snapshot)
+}
+
+/// Preisfeld: `None` bei leerem Text, Fehler bei fehlendem oder ungültigem Feld.
+fn optional_price(item: &Value, key: &str) -> Result<Option<f64>, ExchangeError> {
+    let value = optional_number(item, key)?;
+    Ok((value > 0.0).then_some(value))
 }
 
 fn optional_number(item: &Value, key: &str) -> Result<f64, ExchangeError> {
@@ -185,7 +195,9 @@ mod tests {
     #[test]
     fn long_position_converts_contracts_and_carries_upl() {
         // Arrange: 5 Kontrakte long, Verlust -12.5 USDT
-        let data = [json!({"instId": "BTC-USDT-SWAP", "pos": "5", "upl": "-12.5"})];
+        let data = [
+            json!({"instId": "BTC-USDT-SWAP", "pos": "5", "upl": "-12.5", "liqPx": "", "markPx": ""}),
+        ];
         // Act
         let snap = parse_swap_position(&data, &btc_swap()).expect("parses");
         // Assert
@@ -196,7 +208,9 @@ mod tests {
 
     #[test]
     fn short_position_is_negative_in_base() {
-        let data = [json!({"instId": "BTC-USDT-SWAP", "pos": "-3", "upl": "4"})];
+        let data = [
+            json!({"instId": "BTC-USDT-SWAP", "pos": "-3", "upl": "4", "liqPx": "", "markPx": ""}),
+        ];
         let snap = parse_swap_position(&data, &btc_swap()).expect("parses");
         assert!((snap.base_qty + 0.03).abs() < 1e-12);
     }
@@ -220,6 +234,27 @@ mod tests {
         );
         let missing = [json!({"instId": "BTC-USDT-SWAP", "pos": "1"})];
         assert!(parse_swap_position(&missing, &btc_swap()).is_err());
+    }
+
+    #[test]
+    fn open_position_carries_mark_and_liquidation_price() {
+        let data = [json!({
+            "instId": "BTC-USDT-SWAP", "pos": "2", "upl": "1.0",
+            "liqPx": "45000.5", "markPx": "50000"
+        })];
+        let snap = parse_swap_position(&data, &btc_swap()).expect("parses");
+        assert_eq!(snap.liq_price, Some(45_000.5));
+        assert_eq!(snap.mark_price, Some(50_000.0));
+    }
+
+    #[test]
+    fn flat_position_has_no_liquidation_price() {
+        let data = [json!({
+            "instId": "BTC-USDT-SWAP", "pos": "0", "upl": "", "liqPx": "", "markPx": ""
+        })];
+        let snap = parse_swap_position(&data, &btc_swap()).expect("parses");
+        assert_eq!(snap.liq_price, None);
+        assert_eq!(snap.mark_price, None);
     }
 
     #[test]

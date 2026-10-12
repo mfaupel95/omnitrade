@@ -128,6 +128,10 @@ pub struct PositionSnapshot {
     pub base_qty: f64,
     /// Unrealisierter PnL in der Quote-/Settlement-Währung.
     pub unrealized_pnl: f64,
+    /// Liquidationspreis der Position, sofern offen. Vom Exchange berechnet.
+    pub liq_price: Option<f64>,
+    /// Markpreis laut Exchange, sofern offen.
+    pub mark_price: Option<f64>,
 }
 
 #[cfg(test)]

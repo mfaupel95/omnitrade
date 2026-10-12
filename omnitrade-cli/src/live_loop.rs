@@ -294,6 +294,43 @@ pub(crate) fn account_equity(
     pair_equity(account, base, quote, price) + position.unrealized_pnl
 }
 
+/// Mindestabstand Markpreis zu Liquidationspreis (relativ zum Markpreis), bevor eine
+/// Position weiter vergrößert werden darf. Bei 10x isolated liegt der Abstand direkt
+/// nach dem Einstieg bei rund 9 %; 5 % lässt nur noch wenig Spielraum.
+pub(crate) const MIN_LIQUIDATION_DISTANCE: f64 = 0.05;
+
+/// Lehnt Orders ab, die eine offene Perpetual-Position vergrößern, wenn sie der
+/// Liquidation zu nahe ist. Reduzierende Orders bleiben erlaubt, damit man aussteigen
+/// kann. Fehlen die Preise bei offener Position, wird abgelehnt (fail closed).
+pub(crate) fn check_liquidation_distance(
+    position: &PositionSnapshot,
+    side: Side,
+) -> Result<(), String> {
+    if !position.is_perpetual || position.base_qty == 0.0 {
+        return Ok(());
+    }
+    let long = position.base_qty > 0.0;
+    let increases = (side == Side::Buy) == long;
+    if !increases {
+        return Ok(());
+    }
+    let (Some(liq), Some(mark)) = (position.liq_price, position.mark_price) else {
+        return Err("Liquidationspreis oder Markpreis fehlt bei offener Position".to_string());
+    };
+    if !mark.is_finite() || mark <= 0.0 {
+        return Err(format!("ungültiger Markpreis {mark}"));
+    }
+    let distance = (mark - liq).abs() / mark;
+    if distance < MIN_LIQUIDATION_DISTANCE {
+        return Err(format!(
+            "Abstand zur Liquidation {:.2} % unter Mindestwert {:.0} %",
+            distance * 100.0,
+            MIN_LIQUIDATION_DISTANCE * 100.0
+        ));
+    }
+    Ok(())
+}
+
 /// Menge, auf die der Positionsdeckel wirkt: bei Perpetuals die Positionsmenge,
 /// bei Spot der Bestand. Sonst wäre der Deckel bei Perpetuals immer 0 und wirkungslos.
 pub(crate) fn held_base(account: &Account, base: &str, position: &PositionSnapshot) -> f64 {
@@ -461,6 +498,7 @@ pub(crate) async fn place_order_guarded(
         .position_snapshot(&order_req.symbol)
         .await
         .map_err(|e| LiveLoopError::ExchangeError(format!("Position: {e}")))?;
+    check_liquidation_distance(&position, order_req.side).map_err(LiveLoopError::RiskViolation)?;
     let equity = account_equity(&balances, &base, &quote, current_price, &position);
 
     if let Some(limit) = exposure {
@@ -952,7 +990,51 @@ mod tests {
             is_perpetual: true,
             base_qty,
             unrealized_pnl: upl,
+            ..PositionSnapshot::default()
         }
+    }
+
+    fn perp_with_liq(base_qty: f64, mark: f64, liq: Option<f64>) -> PositionSnapshot {
+        PositionSnapshot {
+            is_perpetual: true,
+            base_qty,
+            unrealized_pnl: 0.0,
+            liq_price: liq,
+            mark_price: Some(mark),
+        }
+    }
+
+    #[test]
+    fn opening_or_growing_near_liquidation_is_rejected() {
+        // Arrange: Long bei Mark 50 000, Liquidation 48 000 = 4 % Abstand
+        let near = perp_with_liq(0.05, 50_000.0, Some(48_000.0));
+        // Act + Assert
+        assert!(check_liquidation_distance(&near, Side::Buy).is_err());
+    }
+
+    #[test]
+    fn reducing_near_liquidation_stays_allowed() {
+        let near = perp_with_liq(0.05, 50_000.0, Some(48_000.0));
+        assert!(check_liquidation_distance(&near, Side::Sell).is_ok());
+    }
+
+    #[test]
+    fn healthy_distance_allows_growing_position() {
+        // 6 % Abstand über der Schwelle
+        let healthy = perp_with_liq(0.05, 50_000.0, Some(47_000.0));
+        assert!(check_liquidation_distance(&healthy, Side::Buy).is_ok());
+    }
+
+    #[test]
+    fn open_position_without_liquidation_price_fails_closed() {
+        let missing = perp_with_liq(0.05, 50_000.0, None);
+        assert!(check_liquidation_distance(&missing, Side::Buy).is_err());
+    }
+
+    #[test]
+    fn flat_position_passes_liquidation_check() {
+        let flat = perp_with_liq(0.0, 50_000.0, None);
+        assert!(check_liquidation_distance(&flat, Side::Buy).is_ok());
     }
 
     #[test]
