@@ -6,6 +6,7 @@
 use crate::grid_loop::{grid_loop, GridLiveConfig};
 use crate::kill_switch;
 use crate::live_loop::{live_loop, valid_mainnet_cap, LiveConfig, MAINNET_HARD_CAP};
+use omnitrade_exchange::okx::{swap, InstType};
 use omnitrade_exchange::{
     credentials, fetch_symbol_filters, BinanceClient, Exchange, Keystore, Network, OkxClient,
     OkxRestClient,
@@ -107,6 +108,12 @@ pub async fn handle_live(args: &LiveArgs<'_>) -> Result<(), Box<dyn std::error::
         if grid_config_path.is_some() {
             return Err("Grid-Live auf Mainnet ist gesperrt (nur Testnet)".into());
         }
+        if is_swap_symbol(symbol) {
+            return Err(
+                "SWAP (Perpetual) auf Mainnet ist gesperrt, bis die Demo-Verifikation abgeschlossen ist"
+                    .into(),
+            );
+        }
         if !valid_mainnet_cap(max_notional) {
             return Err(format!(
                 "Mainnet braucht --max-notional-usd größer 0 und höchstens {MAINNET_HARD_CAP}"
@@ -192,13 +199,20 @@ pub async fn handle_live(args: &LiveArgs<'_>) -> Result<(), Box<dyn std::error::
             }
             Exchange::Okx => {
                 // Testnet = OKX demo trading (demo API keys, simulated-trading header).
+                let eea = okx_region_is_eea()?;
                 let (creds, passphrase) = load_okx_credentials(network)?;
-                let stream_client = OkxClient::for_network(network);
+                let stream_client = OkxClient::for_region(network, eea);
                 let mut trading_client = OkxRestClient::new(creds, passphrase)?;
-                // EWR-/US-Konten liegen auf eigenen API-Domains (z. B. https://eea.okx.com).
+                // EWR-Konten: eea.okx.com. OKX_REST_BASE überschreibt den Default.
+                if eea {
+                    trading_client = trading_client.with_base_url(OKX_EEA_REST);
+                }
                 if let Ok(base) = std::env::var("OKX_REST_BASE") {
                     info!("OKX-API-Domain: {base}");
                     trading_client = trading_client.with_base_url(base);
+                }
+                if is_swap_symbol(symbol) {
+                    prepare_okx_swap(&trading_client, symbol).await?;
                 }
 
                 live_loop(&config, stream_client, trading_client, &mut risk_guard).await?;
@@ -263,6 +277,69 @@ fn load_credentials(
         credentials::ApiCredentials::new(api_key, api_secret, network)
     };
     Ok(creds)
+}
+
+/// REST-Domain für EWR-Konten.
+const OKX_EEA_REST: &str = "https://eea.okx.com";
+
+/// `OKX_REGION=eea` für EWR-Konten; `global` oder ungesetzt sonst. Andere Werte
+/// werden abgelehnt, damit ein Tippfehler nicht still auf die falsche Domain zeigt.
+fn okx_region_is_eea() -> Result<bool, Box<dyn std::error::Error>> {
+    match std::env::var("OKX_REGION").ok().as_deref() {
+        None | Some("global") => Ok(false),
+        Some("eea") => Ok(true),
+        Some(other) => {
+            Err(format!("OKX_REGION muss 'eea' oder 'global' sein, war '{other}'").into())
+        }
+    }
+}
+
+/// Erkennt SWAP-Symbole (`BTC-USDT-SWAP`).
+fn is_swap_symbol(symbol: &str) -> bool {
+    symbol.to_uppercase().ends_with("-SWAP")
+}
+
+/// Hebel aus `OKX_LEVERAGE` (Default 1, Deckel [`swap::MAX_LEVERAGE`]).
+fn okx_leverage() -> Result<u32, Box<dyn std::error::Error>> {
+    let raw = std::env::var("OKX_LEVERAGE").unwrap_or_else(|_| "1".to_string());
+    parse_leverage(&raw).map_err(Into::into)
+}
+
+/// Reine Validierung des Hebels, getrennt von der Umgebungsvariable für Tests.
+fn parse_leverage(raw: &str) -> Result<u32, String> {
+    let lever: u32 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("OKX_LEVERAGE muss eine ganze Zahl sein, war '{raw}'"))?;
+    if lever == 0 || lever > swap::MAX_LEVERAGE {
+        return Err(format!(
+            "OKX_LEVERAGE muss 1..={} sein, war {lever}",
+            swap::MAX_LEVERAGE
+        ));
+    }
+    Ok(lever)
+}
+
+/// Konto und Instrument für SWAP vorbereiten, fail closed: one-way-Modus prüfen,
+/// Handelsregeln laden, Hebel (isolated) setzen. Jeder Fehler stoppt den Start.
+async fn prepare_okx_swap(
+    client: &OkxRestClient,
+    symbol: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let symbol = symbol.to_uppercase();
+    let lever = okx_leverage()?;
+    client.ensure_net_mode().await?;
+    let inst = client.load_instrument(&symbol, InstType::Swap).await?;
+    info!(
+        "SWAP {symbol}: ctVal {} {}, lotSz {}, minSz {} Kontrakte",
+        inst.ct_val,
+        symbol.split('-').next().unwrap_or(""),
+        inst.lot_sz,
+        inst.min_sz
+    );
+    client.set_leverage(&symbol, lever).await?;
+    info!("SWAP {symbol}: isolated, one-way, Hebel {lever}x");
+    Ok(())
 }
 
 /// OKX-Zugänge: Keystore (`omnitrade/okx/<netzwerk>`) hat Vorrang, sonst
@@ -405,6 +482,23 @@ mod tests {
     async fn mainnet_requires_explicit_real_money_confirmation() {
         let err = rejected(mainnet("okx", None, Some(20.0), false)).await;
         assert!(err.contains("--confirm-real-money"), "{err}");
+    }
+
+    #[test]
+    fn leverage_is_bounded_to_one_through_ten() {
+        assert_eq!(parse_leverage("1"), Ok(1));
+        assert_eq!(parse_leverage(" 10 "), Ok(10));
+        assert!(parse_leverage("0").is_err());
+        assert!(parse_leverage("11").is_err());
+        assert!(parse_leverage("2.5").is_err());
+        assert!(parse_leverage("").is_err());
+    }
+
+    #[test]
+    fn swap_symbols_are_detected_case_insensitively() {
+        assert!(is_swap_symbol("BTC-USDT-SWAP"));
+        assert!(is_swap_symbol("btc-usdt-swap"));
+        assert!(!is_swap_symbol("BTC-USDT"));
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
-//! OKX REST client (spot, `tdMode=cash`).
+//! OKX REST client. SPOT uses `tdMode=cash`; SWAP (perpetual) uses `tdMode=isolated`
+//! and the SWAP-specific helpers in `swap_client`.
 //!
 //! `Network::Testnet` means OKX **demo trading**: requests carry
 //! `x-simulated-trading: 1` and need demo API keys. OKX additionally requires an API
 //! passphrase, which `ApiCredentials` has no field for, so it is passed separately.
 
+use std::collections::HashMap;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use omnitrade_core::{Order, OrderStatus, OrderType, Side, TimeInForce};
@@ -13,6 +16,7 @@ use serde_json::{json, Value};
 use crate::credentials::{ApiCredentials, Network};
 use crate::error::ExchangeError;
 use crate::okx::signing::{iso_timestamp, OkxSigner};
+use crate::okx::swap_client::{is_swap_id, InstrumentCache};
 use crate::trading::{Account, AccountBalance, ExchangeTrading, OrderRequest};
 
 const BASE_URL: &str = "https://www.okx.com";
@@ -26,6 +30,7 @@ pub struct OkxRestClient {
     base_url: String,
     credentials: ApiCredentials,
     passphrase: String,
+    pub(crate) instruments: InstrumentCache,
 }
 
 impl OkxRestClient {
@@ -55,6 +60,7 @@ impl OkxRestClient {
             base_url: BASE_URL.to_string(),
             credentials,
             passphrase,
+            instruments: RwLock::new(HashMap::new()),
         })
     }
 
@@ -71,7 +77,7 @@ impl OkxRestClient {
     }
 
     /// Sends a signed request and returns the validated `data` array of the envelope.
-    async fn call(
+    pub(crate) async fn call(
         &self,
         method: Method,
         path: &str,
@@ -241,19 +247,24 @@ impl ExchangeTrading for OkxRestClient {
                 )))
             }
         };
-        let mut body = json!({
-            "instId": req.symbol,
-            "tdMode": "cash",
-            "side": if req.side == Side::Buy { "buy" } else { "sell" },
-            "ordType": ord_type,
-            "sz": req.quantity.to_string(),
-        });
-        if let Some(price) = px {
-            body["px"] = json!(price.to_string());
+        let body = if is_swap_id(&req.symbol) {
+            self.swap_order_body(req, px)?
         } else {
-            // Without this, a market buy's size would be read as quote currency.
-            body["tgtCcy"] = json!("base_ccy");
-        }
+            let mut body = json!({
+                "instId": req.symbol,
+                "tdMode": "cash",
+                "side": if req.side == Side::Buy { "buy" } else { "sell" },
+                "ordType": ord_type,
+                "sz": req.quantity.to_string(),
+            });
+            if let Some(price) = px {
+                body["px"] = json!(price.to_string());
+            } else {
+                // Without this, a market buy's size would be read as quote currency.
+                body["tgtCcy"] = json!("base_ccy");
+            }
+            body
+        };
         let data = self
             .call(Method::POST, "/api/v5/trade/order", Some(&body))
             .await?;
@@ -292,14 +303,15 @@ impl ExchangeTrading for OkxRestClient {
     }
 
     async fn get_open_orders(&self) -> Result<Vec<Order>, ExchangeError> {
+        // Ohne instType-Filter: OKX liefert SPOT und SWAP gemeinsam, SWAP wird unten
+        // in Basiswährung zurückgerechnet.
         let data = self
-            .call(
-                Method::GET,
-                "/api/v5/trade/orders-pending?instType=SPOT",
-                None,
-            )
+            .call(Method::GET, "/api/v5/trade/orders-pending", None)
             .await?;
-        Ok(data.iter().filter_map(parse_order).collect())
+        data.iter()
+            .filter_map(parse_order)
+            .map(|o| self.to_base_units(o))
+            .collect()
     }
 
     async fn get_balance(&self) -> Result<Account, ExchangeError> {
@@ -320,7 +332,11 @@ impl ExchangeTrading for OkxRestClient {
             urlencoding::encode(order_id)
         );
         match self.call(Method::GET, &path, None).await {
-            Ok(data) => Ok(data.first().and_then(parse_order)),
+            Ok(data) => data
+                .first()
+                .and_then(parse_order)
+                .map(|o| self.to_base_units(o))
+                .transpose(),
             Err(ExchangeError::ApiError(msg)) if msg.starts_with(ORDER_NOT_FOUND) => Ok(None),
             Err(e) => Err(e),
         }

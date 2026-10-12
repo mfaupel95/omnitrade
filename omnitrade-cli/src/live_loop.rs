@@ -251,16 +251,17 @@ async fn halt_trading(
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))
 }
 
-/// Zerlegt ein Börsensymbol in (Basis, Quote): `BTC-USDT`, `BTC/USD` oder `BTCUSDT`.
+/// Zerlegt ein Börsensymbol in (Basis, Quote): `BTC-USDT`, `BTC-USDT-SWAP`, `BTC/USD`
+/// oder `BTCUSDT`. Das Suffix `-SWAP` (Perpetual) bezeichnet dasselbe Paar.
 pub(crate) fn split_symbol(symbol: &str) -> Option<(String, String)> {
     let upper = symbol.to_uppercase();
-    if let Some((base, quote)) = upper.split_once(['-', '/']) {
+    let pair = upper.strip_suffix("-SWAP").unwrap_or(upper.as_str());
+    if let Some((base, quote)) = pair.split_once(['-', '/']) {
         return (!base.is_empty() && !quote.is_empty() && !quote.contains(['-', '/']))
             .then(|| (base.to_string(), quote.to_string()));
     }
     KNOWN_QUOTES.iter().find_map(|quote| {
-        upper
-            .strip_suffix(quote)
+        pair.strip_suffix(quote)
             .filter(|base| !base.is_empty())
             .map(|base| (base.to_string(), (*quote).to_string()))
     })
@@ -917,6 +918,13 @@ mod tests {
             matches!(res, Err(LiveLoopError::RiskViolation(_))),
             "{res:?}"
         );
+    }
+
+    #[test]
+    fn split_symbol_accepts_perpetual_suffix() {
+        let pair = |b: &str, q: &str| Some((b.to_string(), q.to_string()));
+        assert_eq!(split_symbol("BTC-USDT-SWAP"), pair("BTC", "USDT"));
+        assert_eq!(split_symbol("eth-usdt-swap"), pair("ETH", "USDT"));
     }
 
     #[test]

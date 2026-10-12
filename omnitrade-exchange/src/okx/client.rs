@@ -31,6 +31,14 @@ pub const BUSINESS_URL: &str = "wss://ws.okx.com:8443/ws/v5/business";
 pub const DEMO_PUBLIC_URL: &str = "wss://wspap.okx.com:8443/ws/v5/public";
 /// Demo-trading WebSocket endpoint for candles.
 pub const DEMO_BUSINESS_URL: &str = "wss://wspap.okx.com:8443/ws/v5/business";
+/// EEA-Konten: Produktion (Hosts `wseea`, Keys aus dem EWR-Konto).
+pub const EEA_PUBLIC_URL: &str = "wss://wseea.okx.com:8443/ws/v5/public";
+/// EEA-Konten: Produktion, Kerzen-Kanal.
+pub const EEA_BUSINESS_URL: &str = "wss://wseea.okx.com:8443/ws/v5/business";
+/// EEA-Konten: Demo-Trading, Depth.
+pub const EEA_DEMO_PUBLIC_URL: &str = "wss://wseeapap.okx.com:8443/ws/v5/public";
+/// EEA-Konten: Demo-Trading, Kerzen-Kanal.
+pub const EEA_DEMO_BUSINESS_URL: &str = "wss://wseeapap.okx.com:8443/ws/v5/business";
 
 /// Maps an interval string to OKX's channel suffix (`1m`, `1H`, `1D`, ...).
 pub(crate) fn interval_code(interval: &str) -> Option<&'static str> {
@@ -49,10 +57,11 @@ pub(crate) fn interval_code(interval: &str) -> Option<&'static str> {
     }
 }
 
-/// OKX instruments are `BASE-QUOTE` (e.g. `BTC-USDT`).
+/// OKX instruments are `BASE-QUOTE` (e.g. `BTC-USDT`) or perpetuals `BASE-QUOTE-SWAP`.
 fn validate_symbol(symbol: &str) -> Result<String, ExchangeError> {
     let upper = symbol.to_uppercase();
-    match upper.split_once('-') {
+    let core = upper.strip_suffix("-SWAP").unwrap_or(upper.as_str());
+    match core.split_once('-') {
         Some((base, quote)) if !base.is_empty() && !quote.is_empty() && !quote.contains('-') => {
             Ok(upper)
         }
@@ -85,9 +94,17 @@ impl OkxClient {
 
     /// Creates a client whose endpoints match the network (`Testnet` = demo trading).
     pub fn for_network(network: Network) -> Self {
-        match network {
-            Network::Testnet => Self::with_urls(DEMO_PUBLIC_URL, DEMO_BUSINESS_URL),
-            Network::Mainnet => Self::new(),
+        Self::for_region(network, false)
+    }
+
+    /// Like [`Self::for_network`], but `eea = true` selects the `wseea`/`wseeapap` hosts
+    /// used by accounts registered in the EEA.
+    pub fn for_region(network: Network, eea: bool) -> Self {
+        match (network, eea) {
+            (Network::Testnet, false) => Self::with_urls(DEMO_PUBLIC_URL, DEMO_BUSINESS_URL),
+            (Network::Testnet, true) => Self::with_urls(EEA_DEMO_PUBLIC_URL, EEA_DEMO_BUSINESS_URL),
+            (Network::Mainnet, false) => Self::new(),
+            (Network::Mainnet, true) => Self::with_urls(EEA_PUBLIC_URL, EEA_BUSINESS_URL),
         }
     }
 
@@ -298,6 +315,29 @@ impl ExchangeInfo for OkxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perpetual_symbols_are_accepted_and_malformed_ones_rejected() {
+        // Arrange + Act + Assert
+        assert_eq!(
+            validate_symbol("btc-usdt-swap").expect("swap"),
+            "BTC-USDT-SWAP"
+        );
+        assert_eq!(validate_symbol("BTC-USDT").expect("spot"), "BTC-USDT");
+        assert!(validate_symbol("BTC-USDT-SWAP-X").is_err());
+        assert!(validate_symbol("-USDT-SWAP").is_err());
+    }
+
+    #[test]
+    fn region_selects_eea_hosts_only_when_requested() {
+        // Arrange + Act
+        let global = OkxClient::for_region(Network::Testnet, false);
+        let eea = OkxClient::for_region(Network::Testnet, true);
+        // Assert
+        assert_eq!(global.public_url, DEMO_PUBLIC_URL);
+        assert_eq!(eea.public_url, EEA_DEMO_PUBLIC_URL);
+        assert_eq!(eea.business_url, EEA_DEMO_BUSINESS_URL);
+    }
 
     #[tokio::test]
     async fn candles_go_to_business_and_books_to_public() {
