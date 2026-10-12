@@ -35,6 +35,6 @@ pub use error::ExchangeError;
 pub use keystore::Keystore;
 pub use kraken::{KrakenClient, KrakenRestClient};
 pub use okx::{OkxClient, OkxRestClient};
-pub use trading::{Account, AccountBalance, ExchangeTrading, OrderRequest};
+pub use trading::{Account, AccountBalance, ExchangeTrading, OrderRequest, PositionSnapshot};
 pub use traits::{DepthUpdate, ExchangeInfo, ExchangeStream};
 pub use venue::Exchange;

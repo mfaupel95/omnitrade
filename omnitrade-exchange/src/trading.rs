@@ -111,6 +111,23 @@ pub trait ExchangeTrading: Send + Sync {
             .map_err(|_| ExchangeError::InvalidRequest("Invalid order ID format".to_string()))?;
         Ok(orders.into_iter().find(|o| o.id == order_id_num))
     }
+
+    /// Offene Position im Symbol. Spot hat keine Positionen: der Default liefert null.
+    /// Perpetual-Adapter überschreiben dies mit den echten Werten.
+    async fn position_snapshot(&self, _symbol: &str) -> Result<PositionSnapshot, ExchangeError> {
+        Ok(PositionSnapshot::default())
+    }
+}
+
+/// Position und unrealisierter PnL eines Symbols, wie sie die Risikoprüfung braucht.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PositionSnapshot {
+    /// `true` für Perpetuals. Dann ersetzt `base_qty` den Spot-Bestand als Exposure.
+    pub is_perpetual: bool,
+    /// Vorzeichenbehaftete Menge in Basiswährung (positiv = long).
+    pub base_qty: f64,
+    /// Unrealisierter PnL in der Quote-/Settlement-Währung.
+    pub unrealized_pnl: f64,
 }
 
 #[cfg(test)]

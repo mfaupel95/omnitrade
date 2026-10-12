@@ -5,7 +5,9 @@
 //! and places orders via the exchange trading interface.
 
 use omnitrade_core::{Candle, OrderStatus, Side, TimeInForce};
-use omnitrade_exchange::{Account, ExchangeStream, ExchangeTrading, Network, OrderRequest};
+use omnitrade_exchange::{
+    Account, ExchangeStream, ExchangeTrading, Network, OrderRequest, PositionSnapshot,
+};
 use omnitrade_risk::guard::RiskGuard;
 use omnitrade_script::compile_and_run;
 use std::fs;
@@ -280,6 +282,30 @@ pub(crate) fn pair_equity(account: &Account, base: &str, quote: &str, price: f64
     total(quote) + total(base) * price
 }
 
+/// Eigenkapital für das Verlustlimit: Kontostände plus unrealisierter PnL offener
+/// Perpetuals. Ohne den PnL erscheint ein offener Verlust erst beim Schließen.
+pub(crate) fn account_equity(
+    account: &Account,
+    base: &str,
+    quote: &str,
+    price: f64,
+    position: &PositionSnapshot,
+) -> f64 {
+    pair_equity(account, base, quote, price) + position.unrealized_pnl
+}
+
+/// Menge, auf die der Positionsdeckel wirkt: bei Perpetuals die Positionsmenge,
+/// bei Spot der Bestand. Sonst wäre der Deckel bei Perpetuals immer 0 und wirkungslos.
+pub(crate) fn held_base(account: &Account, base: &str, position: &PositionSnapshot) -> f64 {
+    if position.is_perpetual {
+        return position.base_qty;
+    }
+    account
+        .balances
+        .get(base)
+        .map_or(0.0, |b| b.free + b.locked)
+}
+
 /// Prüft einen Positionsdeckel für die Position, die ein Lauf selbst aufbaut.
 ///
 /// Bestände, die schon vor dem Lauf im Konto lagen, zählen nicht dazu und werden nie
@@ -431,13 +457,14 @@ pub(crate) async fn place_order_guarded(
         .get_balance()
         .await
         .map_err(|e| LiveLoopError::ExchangeError(format!("Kontostand: {e}")))?;
-    let equity = pair_equity(&balances, &base, &quote, current_price);
+    let position = exchange_trading
+        .position_snapshot(&order_req.symbol)
+        .await
+        .map_err(|e| LiveLoopError::ExchangeError(format!("Position: {e}")))?;
+    let equity = account_equity(&balances, &base, &quote, current_price, &position);
 
     if let Some(limit) = exposure {
-        let held = balances
-            .balances
-            .get(&base)
-            .map_or(0.0, |b| b.free + b.locked);
+        let held = held_base(&balances, &base, &position);
         limit
             .check(order_req.side, order_req.quantity, current_price, held)
             .map_err(LiveLoopError::RiskViolation)?;
@@ -918,6 +945,50 @@ mod tests {
             matches!(res, Err(LiveLoopError::RiskViolation(_))),
             "{res:?}"
         );
+    }
+
+    fn perp(base_qty: f64, upl: f64) -> PositionSnapshot {
+        PositionSnapshot {
+            is_perpetual: true,
+            base_qty,
+            unrealized_pnl: upl,
+        }
+    }
+
+    #[test]
+    fn unrealized_loss_reduces_equity_for_perpetuals() {
+        // Arrange: 1000 USDT Guthaben, offene Long-Position mit -150 USDT
+        let mut account = Account {
+            balances: HashMap::new(),
+        };
+        account.balances.insert(
+            "USDT".to_string(),
+            AccountBalance {
+                free: 1000.0,
+                locked: 0.0,
+            },
+        );
+        // Act + Assert
+        let equity = account_equity(&account, "BTC", "USDT", 50_000.0, &perp(0.05, -150.0));
+        assert!((equity - 850.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perpetual_exposure_uses_position_not_spot_balance() {
+        // Arrange: Spot-BTC-Bestand 2, Perp-Position 0.05 long
+        let mut account = Account {
+            balances: HashMap::new(),
+        };
+        account.balances.insert(
+            "BTC".to_string(),
+            AccountBalance {
+                free: 2.0,
+                locked: 0.0,
+            },
+        );
+        // Act + Assert
+        assert!((held_base(&account, "BTC", &perp(0.05, 0.0)) - 0.05).abs() < 1e-12);
+        assert!((held_base(&account, "BTC", &PositionSnapshot::default()) - 2.0).abs() < 1e-12);
     }
 
     #[test]

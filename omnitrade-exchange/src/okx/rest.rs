@@ -17,7 +17,7 @@ use crate::credentials::{ApiCredentials, Network};
 use crate::error::ExchangeError;
 use crate::okx::signing::{iso_timestamp, OkxSigner};
 use crate::okx::swap_client::{is_swap_id, InstrumentCache};
-use crate::trading::{Account, AccountBalance, ExchangeTrading, OrderRequest};
+use crate::trading::{Account, AccountBalance, ExchangeTrading, OrderRequest, PositionSnapshot};
 
 const BASE_URL: &str = "https://www.okx.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -339,6 +339,14 @@ impl ExchangeTrading for OkxRestClient {
                 .transpose(),
             Err(ExchangeError::ApiError(msg)) if msg.starts_with(ORDER_NOT_FOUND) => Ok(None),
             Err(e) => Err(e),
+        }
+    }
+
+    async fn position_snapshot(&self, symbol: &str) -> Result<PositionSnapshot, ExchangeError> {
+        if is_swap_id(symbol) {
+            self.fetch_swap_position(symbol).await
+        } else {
+            Ok(PositionSnapshot::default())
         }
     }
 }
