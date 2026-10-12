@@ -43,5 +43,6 @@ id_ed25519*
 *api_secret*
 *-keys.txt
 
-# Claude-Code-Worktrees gehoeren nicht in den Verlauf.
-.claude/
+# Claude-Code-Worktrees gehoeren nicht in den Verlauf; Projekt-Skills schon.
+.claude/*
+!.claude/skills/
