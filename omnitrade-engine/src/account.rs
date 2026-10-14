@@ -281,7 +281,11 @@ mod tests {
         );
         acc.apply_fill(&buy).expect("buy");
         assert_eq!(acc.balance, 50_000.0, "Nennwert ist vom Guthaben weg");
-        assert_eq!(acc.total_equity(), 100_000.0, "Equity unveraendert beim Kauf");
+        assert_eq!(
+            acc.total_equity(),
+            100_000.0,
+            "Equity unveraendert beim Kauf"
+        );
 
         // Kurs faellt 10 %: Equity folgt dem Marktwert, nicht dem Guthaben.
         acc.update_unrealized_pnl("BTCUSDT", Side::Buy, 45_000.0)
@@ -308,10 +312,18 @@ mod tests {
         );
         acc.apply_fill(&sell).expect("sell");
         assert_eq!(acc.balance, 150_000.0, "Short bucht den Nennwert zu");
-        assert_eq!(acc.total_equity(), 100_000.0, "Equity unveraendert beim Short");
+        assert_eq!(
+            acc.total_equity(),
+            100_000.0,
+            "Equity unveraendert beim Short"
+        );
 
         acc.update_unrealized_pnl("BTCUSDT", Side::Sell, 55_000.0)
             .expect("mark");
-        assert_eq!(acc.total_equity(), 95_000.0, "Short verliert, wenn der Kurs steigt");
+        assert_eq!(
+            acc.total_equity(),
+            95_000.0,
+            "Short verliert, wenn der Kurs steigt"
+        );
     }
 }
