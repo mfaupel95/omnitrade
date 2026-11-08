@@ -3,7 +3,7 @@
 use omnitrade_core::Candle;
 use serde_json::Value;
 
-use crate::binance::klines::get_text;
+use crate::binance::klines::get_text_with_headers;
 use crate::credentials::Network;
 use crate::error::ExchangeError;
 use crate::okx::client::interval_code;
@@ -14,13 +14,15 @@ const MAX_LIMIT: usize = 300;
 
 /// Lädt die letzten bestätigten Kerzen (älteste zuerst, höchstens `limit`).
 ///
-/// Marktdaten sind in Produktion und Demo identisch; `network` ist nur für die
-/// einheitliche Signatur der Börsen-Abrufe da.
+/// Auf dem Demo (`Network::Testnet`) geht `x-simulated-trading: 1` mit: Spot und
+/// normale Perps haben dort dieselben Kerzen, die XPERP-Kontrakte aber einen
+/// eigenen Verfallscode (HYPE: Mainnet 310523, Demo 310801), der nur mit dem
+/// Header existiert (sonst 51001).
 ///
 /// # Errors
 /// Fehler beim Abruf, bei nicht unterstütztem Intervall oder unlesbarer Antwort.
 pub async fn fetch_klines(
-    _network: Network,
+    network: Network,
     symbol: &str,
     interval: &str,
     limit: usize,
@@ -32,16 +34,25 @@ pub async fn fetch_klines(
     })?;
     let url = format!("{BASE_URL}/api/v5/market/candles");
     let limit = limit.clamp(1, MAX_LIMIT).to_string();
-    let body = get_text(
+    let body = get_text_with_headers(
         &url,
         &[
             ("instId", symbol.to_uppercase().as_str()),
             ("bar", bar),
             ("limit", limit.as_str()),
         ],
+        demo_headers(network),
     )
     .await?;
     parse_candles(&body)
+}
+
+/// Zusatz-Header je Netz: nur das Demo schickt `x-simulated-trading: 1`.
+fn demo_headers(network: Network) -> &'static [(&'static str, &'static str)] {
+    match network {
+        Network::Testnet => &[("x-simulated-trading", "1")],
+        Network::Mainnet => &[],
+    }
 }
 
 /// Parst `{"code":"0","data":[[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm],..]}`
@@ -103,6 +114,15 @@ mod tests {
         assert_eq!(candles[0].timestamp_ms, 1000);
         assert_eq!(candles[1].timestamp_ms, 2000);
         assert_eq!((candles[0].close, candles[0].volume), (1.7, 12.0));
+    }
+
+    #[test]
+    fn only_demo_sends_simulated_trading_header() {
+        assert_eq!(
+            demo_headers(Network::Testnet),
+            &[("x-simulated-trading", "1")]
+        );
+        assert!(demo_headers(Network::Mainnet).is_empty());
     }
 
     #[test]

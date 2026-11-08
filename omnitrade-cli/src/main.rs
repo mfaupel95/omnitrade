@@ -51,10 +51,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = run_backtest(&config)?;
             println!("=== Backtest Results ===");
             println!("Total PnL:       {:.2}", result.total_pnl);
+            if let Some(return_pct) = result.strategy_return_pct {
+                println!("Return:          {return_pct:.2}%");
+            } else {
+                println!("Return:          n/a");
+            }
             println!("Final Balance:   {:.2}", result.final_balance);
             println!("Total Trades:    {}", result.total_trades);
-            println!("Win Rate:        {:.2}%", result.win_rate * 100.0);
+            if result.total_trades > 0 {
+                println!("Win Rate:        {:.2}%", result.win_rate * 100.0);
+            } else {
+                println!("Win Rate:        n/a (no closed trades)");
+            }
             println!("Max Drawdown:    {:.2}%", result.max_drawdown * 100.0);
+            println!("Candles:         {}", result.candles);
+            if let Some(pnl) = result.buy_hold_pnl {
+                if let Some(return_pct) = result.buy_hold_return_pct {
+                    println!("Buy & Hold:      {pnl:.2} ({return_pct:.2}%, same quantity, costs included)");
+                } else {
+                    println!("Buy & Hold:      {pnl:.2} (return n/a)");
+                }
+                if let Some(excess) = result.excess_vs_buy_hold {
+                    println!("Excess vs B&H:   {excess:.2}");
+                }
+            } else {
+                println!("Buy & Hold:      n/a (no candle data)");
+            }
+            println!(
+                "Costs:           {:.4}% fee per side, {:.2} bps slippage per side",
+                fee_rate * 100.0,
+                slippage_bps
+            );
         }
         Commands::Validate { script } => {
             let script_content = std::fs::read_to_string(&script)?;

@@ -70,6 +70,15 @@ pub async fn fetch_klines(
 }
 
 pub(crate) async fn get_text(url: &str, query: &[(&str, &str)]) -> Result<String, ExchangeError> {
+    get_text_with_headers(url, query, &[]).await
+}
+
+/// Wie [`get_text`], mit zusätzlichen Headern (z. B. `x-simulated-trading` für OKX-Demo).
+pub(crate) async fn get_text_with_headers(
+    url: &str,
+    query: &[(&str, &str)],
+    headers: &[(&str, &str)],
+) -> Result<String, ExchangeError> {
     let conn_err = |e: reqwest::Error| ExchangeError::ConnectionFailed {
         url: url.to_string(),
         reason: e.to_string(),
@@ -78,12 +87,11 @@ pub(crate) async fn get_text(url: &str, query: &[(&str, &str)]) -> Result<String
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(conn_err)?;
-    let response = client
-        .get(url)
-        .query(query)
-        .send()
-        .await
-        .map_err(conn_err)?;
+    let mut request = client.get(url).query(query);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = request.send().await.map_err(conn_err)?;
     let status = response.status();
     let body = response.text().await.map_err(conn_err)?;
     if !status.is_success() {
