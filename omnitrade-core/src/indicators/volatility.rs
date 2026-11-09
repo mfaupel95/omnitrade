@@ -64,6 +64,16 @@ impl Volatility {
     /// When the buffer is full, uses an incremental update that removes the
     /// oldest value and adds the new one, maintaining O(1) per update.
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // A singleton has no dispersion. Assign directly to avoid cancellation
+        // when replacing a large value with a much smaller one.
+        if self.period == 1 {
+            self.buffer[0] = value;
+            self.count = 1;
+            self.mean = value;
+            self.m2 = 0.0;
+            return Some(0.0);
+        }
+
         if self.count < self.period {
             // Accumulating phase: use standard Welford's add
             self.buffer[self.pos] = value;
@@ -197,6 +207,21 @@ mod tests {
         let mut vol = Volatility::new(1).expect("valid period");
         assert_relative_eq!(vol.update(42.0).unwrap(), 0.0);
         assert_relative_eq!(vol.update(100.0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn volatility_single_value_window_large_price_changes() {
+        let mut vol = Volatility::new(1).expect("valid period");
+        for price in [1e16, 1.0, 2.0, -1e16, 0.1] {
+            assert_eq!(vol.update(price), Some(0.0));
+            assert_eq!(vol.mean(), price);
+            assert_eq!(vol.variance(), Some(0.0));
+            assert_eq!(vol.value(), Some(0.0));
+        }
+        vol.reset();
+        assert_eq!(vol.value(), None);
+        assert_eq!(vol.update(3.0), Some(0.0));
+        assert_eq!(vol.mean(), 3.0);
     }
 
     #[test]
