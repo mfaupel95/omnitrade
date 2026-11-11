@@ -251,7 +251,13 @@ fn run_backtest_with_script_and_candles(
             if let Some(tp) = long_take {
                 if c.high >= tp {
                     let pnl = close_at(
-                        &mut acc, sym, Side::Buy, tp, cfg.fee_rate, cfg.slippage_bps, "TP",
+                        &mut acc,
+                        sym,
+                        Side::Buy,
+                        tp,
+                        cfg.fee_rate,
+                        cfg.slippage_bps,
+                        "TP",
                     )?;
                     order_id += 1;
                     total_trades += 1;
@@ -265,7 +271,13 @@ fn run_backtest_with_script_and_candles(
             if let Some(sl) = long_stop {
                 if c.low <= sl {
                     let pnl = close_at(
-                        &mut acc, sym, Side::Buy, sl, cfg.fee_rate, cfg.slippage_bps, "STOP",
+                        &mut acc,
+                        sym,
+                        Side::Buy,
+                        sl,
+                        cfg.fee_rate,
+                        cfg.slippage_bps,
+                        "STOP",
                     )?;
                     order_id += 1;
                     total_trades += 1;
@@ -290,7 +302,13 @@ fn run_backtest_with_script_and_candles(
             if let Some(tp) = short_take {
                 if c.low <= tp {
                     let pnl = close_at(
-                        &mut acc, sym, Side::Sell, tp, cfg.fee_rate, cfg.slippage_bps, "TP",
+                        &mut acc,
+                        sym,
+                        Side::Sell,
+                        tp,
+                        cfg.fee_rate,
+                        cfg.slippage_bps,
+                        "TP",
                     )?;
                     order_id += 1;
                     total_trades += 1;
@@ -304,7 +322,13 @@ fn run_backtest_with_script_and_candles(
             if let Some(sl) = short_stop {
                 if c.high >= sl {
                     let pnl = close_at(
-                        &mut acc, sym, Side::Sell, sl, cfg.fee_rate, cfg.slippage_bps, "STOP",
+                        &mut acc,
+                        sym,
+                        Side::Sell,
+                        sl,
+                        cfg.fee_rate,
+                        cfg.slippage_bps,
+                        "STOP",
                     )?;
                     order_id += 1;
                     total_trades += 1;
@@ -322,9 +346,7 @@ fn run_backtest_with_script_and_candles(
 
         match sig {
             Signal::Buy if has_short => {
-                let pnl = close_pos(
-                    &mut acc, sym, Side::Sell, c, cfg.fee_rate, cfg.slippage_bps,
-                )?;
+                let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate, cfg.slippage_bps)?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {
@@ -346,9 +368,7 @@ fn run_backtest_with_script_and_candles(
                 }
             }
             Signal::Sell if has_long => {
-                let pnl = close_pos(
-                    &mut acc, sym, Side::Buy, c, cfg.fee_rate, cfg.slippage_bps,
-                )?;
+                let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate, cfg.slippage_bps)?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {

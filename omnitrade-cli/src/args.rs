@@ -484,12 +484,20 @@ mod tests {
     #[test]
     fn parses_allow_shorts_flag() {
         // Arrange & Act
-        let args = vec!["omnitrade-cli", "live", "--symbol", "BTCUSDT", "--allow-shorts"];
+        let args = vec![
+            "omnitrade-cli",
+            "live",
+            "--symbol",
+            "BTCUSDT",
+            "--allow-shorts",
+        ];
         let parsed = CliArgs::try_parse_from(args).expect("Should parse --allow-shorts");
 
         // Assert
         if let Commands::Live {
-            allow_shorts, symbol, ..
+            allow_shorts,
+            symbol,
+            ..
         } = parsed.command
         {
             assert!(allow_shorts);

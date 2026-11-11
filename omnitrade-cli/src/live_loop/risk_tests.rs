@@ -114,13 +114,33 @@ async fn perpetual_drawdown_still_blocks_own_unrealized_loss() {
     let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
     let trading = trading_with(200.0, 0.0);
     *trading.pos_upl.lock().expect("upl") = (vec![4.0, -3.0], 0);
-    place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None)
-        .await
-        .expect("erste Order");
-    let res =
-        place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None)
-            .await;
-    assert!(matches!(res, Err(LiveLoopError::RiskViolation(_))), "{res:?}");
+    place_order_guarded(
+        &trading,
+        &mut guard,
+        &req,
+        50_000.0,
+        50.0,
+        Some("USDT"),
+        None,
+        None,
+    )
+    .await
+    .expect("erste Order");
+    let res = place_order_guarded(
+        &trading,
+        &mut guard,
+        &req,
+        50_000.0,
+        50.0,
+        Some("USDT"),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(res, Err(LiveLoopError::RiskViolation(_))),
+        "{res:?}"
+    );
 }
 
 fn perp(base_qty: f64, upl: f64) -> PositionSnapshot {
@@ -357,11 +377,15 @@ fn adopt_existing_counts_startbestand_als_laufposition() {
     // Bestand 0.2 bei Start; ohne Adopt gilt er als fremd, mit Adopt zaehlt er.
     let mut fremd = ExposureLimit::new(25.0).allow_shorts(true);
     assert!(fremd.check(Side::Buy, 0.1, 95.0, 0.2).is_ok());
-    let mut eigen = ExposureLimit::new(25.0).allow_shorts(true).adopt_existing(true);
+    let mut eigen = ExposureLimit::new(25.0)
+        .allow_shorts(true)
+        .adopt_existing(true);
     // 0.2 + 0.1 = 0.3 * 95 = 28.5 > 25
     assert!(eigen.check(Side::Buy, 0.1, 95.0, 0.2).is_err());
     // Sell reduziert die uebernommene Position, kein Short.
-    let mut eigen = ExposureLimit::new(25.0).allow_shorts(true).adopt_existing(true);
+    let mut eigen = ExposureLimit::new(25.0)
+        .allow_shorts(true)
+        .adopt_existing(true);
     assert!(eigen.check(Side::Sell, 0.1, 95.0, 0.2).is_ok());
 }
 
