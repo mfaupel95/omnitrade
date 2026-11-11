@@ -95,13 +95,14 @@ fn main() -> eframe::Result<()> {
     }
     let status_path = omnitrade_ui::status_feed::resolve_path(None);
     omnitrade_ui::status_feed::spawn_poller(status_path, Arc::clone(&state));
+    let title = format!("omnitrade — {exchange} {symbol} ({network})");
     let mut app = OmniTradeApp::with_symbol(state, symbol);
     app.venue = exchange.to_string();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_title("omnitrade"),
+            .with_title(title),
         ..Default::default()
     };
 
