@@ -20,6 +20,7 @@ use crate::status::StatusWriter;
 mod risk;
 #[cfg(test)]
 mod risk_tests;
+mod run_state;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -207,13 +208,16 @@ pub async fn live_loop(
     if adopt {
         warn!("OMNITRADE_ADOPT_POSITION=1: bestehende Position wird als Laufposition uebernommen");
     }
+    // Laufbestand über Neustarts: der Wrapper startet die CLI nach jedem Ende neu.
+    let mut run_state = run_state::RunState::open(status.path(), symbol, &network.to_string());
     let mut exposure = max_notional.map(|cap| {
         ExposureLimit::new(cap)
             .allow_shorts(allow_shorts)
             .adopt_existing(adopt)
+            .resume_owned(run_state.resume())
     });
     // Long-only gilt AUCH ohne Deckel: die Bremse haengt nicht an --max-notional.
-    let mut long_only = LongOnlyGuard::new();
+    let mut long_only = LongOnlyGuard::new().resume_owned(run_state.resume());
     if allow_shorts {
         warn!(
             "Shorts aktiviert: Sell-Signale dürfen Kurzpositionen eröffnen \
@@ -327,7 +331,13 @@ pub async fn live_loop(
         // naechsten Kerze; scheitert der Abruf, bleibt der alte Wert stehen und
         // wird geloggt - nie stillschweigend auf 0 gesetzt.
         match exchange_trading.position_snapshot(symbol).await {
-            Ok(snapshot) => status.set_net_quantity(snapshot.base_qty),
+            Ok(snapshot) => {
+                status.set_net_quantity(snapshot.base_qty);
+                if !snapshot.is_perpetual {
+                    run_state::record_spot_run(&exchange_trading, symbol, adopt, &mut run_state)
+                        .await;
+                }
+            }
             Err(err) => {
                 warn!("Position nicht abrufbar ({err}) - Buch bleibt auf dem letzten Stand")
             }
