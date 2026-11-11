@@ -31,13 +31,16 @@ fn get_test_credentials() -> ApiCredentials {
         }
     }
 
-    // Fallback to environment variables for CI/CD
-    let key =
-        std::env::var("BINANCE_TESTNET_KEY").unwrap_or_else(|_| "TEST_KEY_PLACEHOLDER".to_string());
-    let secret = std::env::var("BINANCE_TESTNET_SECRET")
-        .unwrap_or_else(|_| "TEST_SECRET_PLACEHOLDER".to_string());
-
-    ApiCredentials::new(key, secret, Network::Testnet)
+    // Fallback: Umgebungsvariablen (CI/CD). Ohne Zugänge brechen die Tests mit
+    // klarer Meldung ab, statt mit Platzhaltern gegen die Börse zu laufen.
+    let key = std::env::var("BINANCE_TESTNET_KEY");
+    let secret = std::env::var("BINANCE_TESTNET_SECRET");
+    match (key, secret) {
+        (Ok(key), Ok(secret)) => ApiCredentials::new(key, secret, Network::Testnet),
+        _ => panic!(
+            "Keine Testnet-Zugänge: weder Keystore-Eintrag omnitrade/binance/testnet              noch BINANCE_TESTNET_KEY/BINANCE_TESTNET_SECRET"
+        ),
+    }
 }
 
 #[tokio::test]
@@ -87,10 +90,7 @@ async fn test_place_market_order() {
     let creds = get_test_credentials();
     let client = match BinanceRestClient::new(creds) {
         Ok(c) => c,
-        Err(_) => {
-            println!("Skipping test: invalid credentials");
-            return;
-        }
+        Err(e) => panic!("Zugaenge ungueltig: {:?}", e),
     };
 
     let req = OrderRequest::market("BTCUSDT".to_string(), Side::Buy, 0.001);
@@ -102,13 +102,7 @@ async fn test_place_market_order() {
             assert_eq!(order.side, Side::Buy);
             assert!(order.quantity > 0.0);
         }
-        Err(e) => {
-            // Expected if credentials invalid or API rate-limited
-            println!(
-                "Order placement failed (expected if no valid Testnet creds): {:?}",
-                e
-            );
-        }
+        Err(e) => panic!("Testnet-Aufruf fehlgeschlagen: {:?}", e),
     }
 }
 
@@ -118,10 +112,7 @@ async fn test_get_balance() {
     let creds = get_test_credentials();
     let client = match BinanceRestClient::new(creds) {
         Ok(c) => c,
-        Err(_) => {
-            println!("Skipping test: invalid credentials");
-            return;
-        }
+        Err(e) => panic!("Zugaenge ungueltig: {:?}", e),
     };
 
     match client.get_balance().await {
@@ -133,12 +124,7 @@ async fn test_get_balance() {
             // Testnet typically has USDT and BNB balances
             assert!(!account.balances.is_empty(), "Account should have balances");
         }
-        Err(e) => {
-            println!(
-                "Balance retrieval failed (expected if no valid Testnet creds): {:?}",
-                e
-            );
-        }
+        Err(e) => panic!("Testnet-Aufruf fehlgeschlagen: {:?}", e),
     }
 }
 
@@ -148,10 +134,7 @@ async fn test_get_open_orders() {
     let creds = get_test_credentials();
     let client = match BinanceRestClient::new(creds) {
         Ok(c) => c,
-        Err(_) => {
-            println!("Skipping test: invalid credentials");
-            return;
-        }
+        Err(e) => panic!("Zugaenge ungueltig: {:?}", e),
     };
 
     match client.get_open_orders().await {
@@ -161,12 +144,7 @@ async fn test_get_open_orders() {
             // len() is usize and can never be negative.
             println!("Open orders retrieved: {}", orders.len());
         }
-        Err(e) => {
-            println!(
-                "Order retrieval failed (expected if no valid Testnet creds): {:?}",
-                e
-            );
-        }
+        Err(e) => panic!("Testnet-Aufruf fehlgeschlagen: {:?}", e),
     }
 }
 

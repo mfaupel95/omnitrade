@@ -59,6 +59,15 @@ pub struct BacktestResult {
     pub win_rate: f64,
     pub max_drawdown: f64,
     pub final_balance: f64,
+    /// Number of candles consumed from the input data.
+    pub candles: usize,
+    /// Net return as a percentage of starting balance, when the balance is positive.
+    pub strategy_return_pct: Option<f64>,
+    /// Buy-and-hold PnL using the same quantity and fee/slippage assumptions.
+    pub buy_hold_pnl: Option<f64>,
+    pub buy_hold_return_pct: Option<f64>,
+    /// Strategy PnL minus same-quantity buy-and-hold PnL.
+    pub excess_vs_buy_hold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,14 +144,9 @@ fn close_pos(
     side: Side,
     c: &Candle,
     fee_rate: f64,
+    slippage_bps: f64,
 ) -> Result<f64, Box<dyn Error>> {
-    let pnl = acc.close_position_at(sym, side, c.close, fee_rate)?;
-    if std::env::var("OMNI_TRACE").is_ok() {
-        eprintln!(
-            "TRACE close {side:?} @{} pnl={pnl:9.2} balance={:.2}",
-            c.close, acc.balance
-        );
-    }
+    let pnl = close_at(acc, sym, side, c.close, fee_rate, slippage_bps, "END")?;
     Ok(pnl)
 }
 
@@ -153,12 +157,18 @@ fn close_at(
     side: Side,
     price: f64,
     fee_rate: f64,
+    slippage_bps: f64,
     tag: &str,
 ) -> Result<f64, Box<dyn Error>> {
-    let pnl = acc.close_position_at(sym, side, price, fee_rate)?;
+    let order_side = match side {
+        Side::Buy => Side::Sell,
+        Side::Sell => Side::Buy,
+    };
+    let fill_price = SlippageModel::new(slippage_bps)?.apply_slippage(price, order_side);
+    let pnl = acc.close_position_at(sym, side, fill_price, fee_rate)?;
     if std::env::var("OMNI_TRACE").is_ok() {
         eprintln!(
-            "TRACE close {side:?} via {tag} @{price:.2} pnl={pnl:9.2} balance={:.2}",
+            "TRACE close {side:?} via {tag} @{fill_price:.2} pnl={pnl:9.2} balance={:.2}",
             acc.balance
         );
     }
@@ -240,7 +250,9 @@ fn run_backtest_with_script_and_candles(
             }
             if let Some(tp) = long_take {
                 if c.high >= tp {
-                    let pnl = close_at(&mut acc, sym, Side::Buy, tp, cfg.fee_rate, "TP")?;
+                    let pnl = close_at(
+                        &mut acc, sym, Side::Buy, tp, cfg.fee_rate, cfg.slippage_bps, "TP",
+                    )?;
                     order_id += 1;
                     total_trades += 1;
                     if pnl > 0.0 {
@@ -252,7 +264,9 @@ fn run_backtest_with_script_and_candles(
             }
             if let Some(sl) = long_stop {
                 if c.low <= sl {
-                    let pnl = close_at(&mut acc, sym, Side::Buy, sl, cfg.fee_rate, "STOP")?;
+                    let pnl = close_at(
+                        &mut acc, sym, Side::Buy, sl, cfg.fee_rate, cfg.slippage_bps, "STOP",
+                    )?;
                     order_id += 1;
                     total_trades += 1;
                     if pnl > 0.0 {
@@ -275,7 +289,9 @@ fn run_backtest_with_script_and_candles(
             }
             if let Some(tp) = short_take {
                 if c.low <= tp {
-                    let pnl = close_at(&mut acc, sym, Side::Sell, tp, cfg.fee_rate, "TP")?;
+                    let pnl = close_at(
+                        &mut acc, sym, Side::Sell, tp, cfg.fee_rate, cfg.slippage_bps, "TP",
+                    )?;
                     order_id += 1;
                     total_trades += 1;
                     if pnl > 0.0 {
@@ -287,7 +303,9 @@ fn run_backtest_with_script_and_candles(
             }
             if let Some(sl) = short_stop {
                 if c.high >= sl {
-                    let pnl = close_at(&mut acc, sym, Side::Sell, sl, cfg.fee_rate, "STOP")?;
+                    let pnl = close_at(
+                        &mut acc, sym, Side::Sell, sl, cfg.fee_rate, cfg.slippage_bps, "STOP",
+                    )?;
                     order_id += 1;
                     total_trades += 1;
                     if pnl > 0.0 {
@@ -304,7 +322,9 @@ fn run_backtest_with_script_and_candles(
 
         match sig {
             Signal::Buy if has_short => {
-                let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate)?;
+                let pnl = close_pos(
+                    &mut acc, sym, Side::Sell, c, cfg.fee_rate, cfg.slippage_bps,
+                )?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {
@@ -326,7 +346,9 @@ fn run_backtest_with_script_and_candles(
                 }
             }
             Signal::Sell if has_long => {
-                let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate)?;
+                let pnl = close_pos(
+                    &mut acc, sym, Side::Buy, c, cfg.fee_rate, cfg.slippage_bps,
+                )?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {
@@ -384,14 +406,14 @@ fn run_backtest_with_script_and_candles(
 
     if let Some(c) = candles.last() {
         if acc.get_position(sym, Side::Buy).is_some() {
-            let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate)?;
+            let pnl = close_pos(&mut acc, sym, Side::Buy, c, cfg.fee_rate, cfg.slippage_bps)?;
             total_trades += 1;
             if pnl > 0.0 {
                 wins += 1;
             }
         }
         if acc.get_position(sym, Side::Sell).is_some() {
-            let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate)?;
+            let pnl = close_pos(&mut acc, sym, Side::Sell, c, cfg.fee_rate, cfg.slippage_bps)?;
             total_trades += 1;
             if pnl > 0.0 {
                 wins += 1;
@@ -404,12 +426,35 @@ fn run_backtest_with_script_and_candles(
     } else {
         0.0
     };
+    let total_pnl = acc.total_pnl();
+    let strategy_return_pct =
+        (cfg.initial_balance > 0.0).then(|| 100.0 * total_pnl / cfg.initial_balance);
+    let buy_hold_pnl = candles.first().zip(candles.last()).map(|(first, last)| {
+        let slippage = cfg.slippage_bps / 10_000.0;
+        let entry = first.close * (1.0 + slippage);
+        let exit = last.close * (1.0 - slippage);
+        // Match strategy sizing and apply both entry/exit fees and slippage.
+        let quantity = qty;
+        quantity * (exit - entry) - cfg.fee_rate * quantity * (entry + exit)
+    });
+    let buy_hold_return_pct = buy_hold_pnl
+        .filter(|_| cfg.initial_balance > 0.0)
+        .map(|pnl| 100.0 * pnl / cfg.initial_balance);
+    let excess_vs_buy_hold = buy_hold_pnl.map(|pnl| total_pnl - pnl);
+    if peak_equity > 0.0 {
+        max_dd = max_dd.max((peak_equity - acc.total_equity()) / peak_equity);
+    }
     Ok(BacktestResult {
-        total_pnl: acc.total_pnl(),
+        total_pnl,
         total_trades,
         win_rate,
         max_drawdown: max_dd,
         final_balance: acc.balance,
+        candles: candles.len(),
+        strategy_return_pct,
+        buy_hold_pnl,
+        buy_hold_return_pct,
+        excess_vs_buy_hold,
     })
 }
 
@@ -658,9 +703,9 @@ mod tests {
             .expect("backtest run should succeed");
 
         // Assert
-        // PnL assertion adjusted for Phase 5 position model change
-        assert!(result.total_trades >= 1); // Phase 5: Position model change
-                                           // Phase 5: win_rate assertion adjusted for position model change
+        assert!(result.total_pnl > 0.0);
+        assert_eq!(result.total_trades, 1);
+        assert!((result.win_rate - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -683,7 +728,7 @@ mod tests {
 
         // Assert
         assert!(result.total_pnl < 0.0);
-        assert!(result.total_trades >= 1); // Phase 5: Position model change
+        assert_eq!(result.total_trades, 1);
         assert!((result.win_rate - 0.0).abs() < f64::EPSILON);
     }
 

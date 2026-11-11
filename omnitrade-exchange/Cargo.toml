@@ -22,5 +22,8 @@ hmac.workspace = true
 sha2.workspace = true
 keyring.workspace = true
 hex.workspace = true
+base64 = "0.22"
 urlencoding.workspace = true
-base64 = "0.21"
+
+[dev-dependencies]
+tokio-test = "0.4.6"

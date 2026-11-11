@@ -66,9 +66,13 @@ pub enum Commands {
         #[arg(long, value_name = "PATH")]
         grid_config: Option<PathBuf>,
 
-        /// Trading symbol (e.g., "BTCUSDT").
+        /// Trading symbol in the exchange's notation (BTCUSDT, BTC-USDT, BTC/USD).
         #[arg(long, value_name = "SYMBOL")]
         symbol: String,
+
+        /// Exchange: "binance", "okx" or "kraken" (Kraken has no testnet, trading is refused).
+        #[arg(long, value_name = "EXCHANGE", default_value = "binance")]
+        exchange: String,
 
         /// Network: "testnet" or "mainnet".
         #[arg(long, value_name = "NETWORK", default_value = "testnet")]
@@ -79,15 +83,29 @@ pub enum Commands {
         #[arg(long, value_name = "AMOUNT")]
         initial_capital: Option<f64>,
 
+        /// Menge je Market-Order in der Basiswährung (Default 0.001).
+        #[arg(long, value_name = "QTY", default_value_t = 0.001)]
+        quantity: f64,
+
+        /// Deckel für die vom Lauf aufgebaute Position in der Quote-Währung. Auf Mainnet
+        /// Pflicht (höchstens 100); auf dem Testnet optional.
+        #[arg(long, value_name = "AMOUNT")]
+        max_notional_usd: Option<f64>,
+
+        /// Bestätigt, dass auf Mainnet echtes Geld eingesetzt wird (nur OKX).
+        #[arg(long)]
+        confirm_real_money: bool,
+
+        /// Erlaubt Kurzpositionen: Ein Sell-Signal bei (nahezu) flacher Position
+        /// öffnet einen Short (OKX net mode). Standard ist long-only (Haussatz
+        /// C.2: Shorts erst nach belegtem Long-Lauf). Der Positionsdeckel
+        /// `--max-notional-usd` gilt dann in beide Richtungen.
+        #[arg(long)]
+        allow_shorts: bool,
         /// Write a JSON status snapshot to this file while running
         /// (read-only view for dashboards; written atomically).
         #[arg(long, value_name = "PATH")]
         status_file: Option<PathBuf>,
-
-        /// Exchange: "binance" or "okx". OKX testnet means OKX demo trading
-        /// (keys from OKX_DEMO_API_KEY / _SECRET / _PASSPHRASE).
-        #[arg(long, value_name = "EXCHANGE", default_value = "binance")]
-        exchange: String,
 
         /// Candle length the strategy runs on, e.g. "1m", "15m", "1h", "4h",
         /// "1d". On OKX the last 300 closed candles preload the indicators.
@@ -96,10 +114,15 @@ pub enum Commands {
     },
     /// Emergency kill switch to halt all trading operations.
     ///
-    /// Stops a running live trading process and closes all open positions.
+    /// Stops a running live trading process (no new orders, open orders are
+    /// cancelled) and blocks new live runs until `--reset`. Holdings are not sold.
     /// This is a safety mechanism and should be used when risk limits are breached
     /// or market conditions require immediate halt.
-    Kill,
+    Kill {
+        /// Hebt einen gesetzten Not-Aus wieder auf.
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 #[cfg(test)]
@@ -207,6 +230,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_kill_reset_flag() {
+        let parsed = CliArgs::try_parse_from(["omnitrade-cli", "kill", "--reset"])
+            .expect("Should parse kill --reset");
+        assert!(matches!(parsed.command, Commands::Kill { reset: true }));
+    }
+
+    #[test]
     fn test_parse_kill_command() {
         // Arrange
         let args = vec!["omnitrade-cli", "kill"];
@@ -216,7 +246,7 @@ mod tests {
 
         // Assert
         assert!(
-            matches!(parsed.command, Commands::Kill),
+            matches!(parsed.command, Commands::Kill { reset: false }),
             "Expected Commands::Kill variant"
         );
     }
@@ -257,16 +287,28 @@ mod tests {
             script,
             grid_config,
             symbol,
+            exchange,
             network,
             initial_capital,
+            quantity,
+            max_notional_usd,
+            confirm_real_money,
+            status_file,
+            interval,
             ..
         } = parsed.command
         {
             assert_eq!(script, Some(PathBuf::from("strategy.omni")));
             assert_eq!(grid_config, None);
             assert_eq!(symbol, "BTCUSDT");
+            assert_eq!(exchange, "binance");
             assert_eq!(network, "testnet");
             assert_eq!(initial_capital, None);
+            assert_eq!(quantity, 0.001);
+            assert_eq!(max_notional_usd, None);
+            assert_eq!(status_file, None);
+            assert_eq!(interval, "1m");
+            assert!(!confirm_real_money);
         } else {
             unreachable!("Expected Commands::Live variant");
         }
@@ -293,16 +335,28 @@ mod tests {
             script,
             grid_config,
             symbol,
+            exchange,
             network,
             initial_capital,
+            quantity,
+            max_notional_usd,
+            confirm_real_money,
+            status_file,
+            interval,
             ..
         } = parsed.command
         {
             assert_eq!(script, None);
             assert_eq!(grid_config, Some(PathBuf::from("grid.json")));
             assert_eq!(symbol, "BTCUSDT");
+            assert_eq!(exchange, "binance");
             assert_eq!(network, "testnet");
             assert_eq!(initial_capital, None);
+            assert_eq!(quantity, 0.001);
+            assert_eq!(max_notional_usd, None);
+            assert_eq!(status_file, None);
+            assert_eq!(interval, "1m");
+            assert!(!confirm_real_money);
         } else {
             unreachable!("Expected Commands::Live variant");
         }
@@ -333,16 +387,122 @@ mod tests {
             script,
             grid_config,
             symbol,
+            exchange,
             network,
             initial_capital,
+            quantity,
+            max_notional_usd,
+            confirm_real_money,
+            status_file,
+            interval,
             ..
         } = parsed.command
         {
             assert_eq!(script, Some(PathBuf::from("strategy.omni")));
             assert_eq!(grid_config, None);
             assert_eq!(symbol, "ETHUSDT");
+            assert_eq!(exchange, "binance");
             assert_eq!(network, "testnet");
             assert_eq!(initial_capital, Some(5000.0));
+            assert_eq!(quantity, 0.001);
+            assert_eq!(max_notional_usd, None);
+            assert_eq!(status_file, None);
+            assert_eq!(interval, "1m");
+            assert!(!confirm_real_money);
+        } else {
+            unreachable!("Expected Commands::Live variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_command_mainnet_flags() {
+        // Arrange
+        let args = vec![
+            "omnitrade-cli",
+            "live",
+            "--script",
+            "s.omni",
+            "--symbol",
+            "BTC-USDC",
+            "--exchange",
+            "okx",
+            "--network",
+            "mainnet",
+            "--max-notional-usd",
+            "20",
+            "--confirm-real-money",
+        ];
+
+        // Act
+        let parsed = CliArgs::try_parse_from(args).expect("Should parse mainnet flags");
+
+        // Assert
+        if let Commands::Live {
+            max_notional_usd,
+            confirm_real_money,
+            network,
+            ..
+        } = parsed.command
+        {
+            assert_eq!(max_notional_usd, Some(20.0));
+            assert!(confirm_real_money);
+            assert_eq!(network, "mainnet");
+        } else {
+            unreachable!("Expected Commands::Live variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_command_exchange_flag() {
+        // Arrange
+        let args = vec![
+            "omnitrade-cli",
+            "live",
+            "--script",
+            "s.omni",
+            "--symbol",
+            "BTC-USDT",
+            "--exchange",
+            "okx",
+        ];
+
+        // Act
+        let parsed = CliArgs::try_parse_from(args).expect("Should parse --exchange");
+
+        // Assert
+        if let Commands::Live {
+            exchange, symbol, ..
+        } = parsed.command
+        {
+            assert_eq!(exchange, "okx");
+            assert_eq!(symbol, "BTC-USDT");
+        } else {
+            unreachable!("Expected Commands::Live variant");
+        }
+    }
+
+    #[test]
+    fn parses_allow_shorts_flag() {
+        // Arrange & Act
+        let args = vec!["omnitrade-cli", "live", "--symbol", "BTCUSDT", "--allow-shorts"];
+        let parsed = CliArgs::try_parse_from(args).expect("Should parse --allow-shorts");
+
+        // Assert
+        if let Commands::Live {
+            allow_shorts, symbol, ..
+        } = parsed.command
+        {
+            assert!(allow_shorts);
+            assert_eq!(symbol, "BTCUSDT");
+        } else {
+            unreachable!("Expected Commands::Live variant");
+        }
+
+        // Ohne Flag: long-only bleibt der Standard.
+        let parsed = CliArgs::try_parse_from(["omnitrade-cli", "live", "--symbol", "BTCUSDT"])
+            .expect("Should parse without flag");
+        if let Commands::Live { allow_shorts, .. } = parsed.command {
+            assert!(!allow_shorts);
         } else {
             unreachable!("Expected Commands::Live variant");
         }

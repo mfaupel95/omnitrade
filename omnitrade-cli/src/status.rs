@@ -131,6 +131,11 @@ impl StatusWriter {
         &self.status
     }
 
+    /// Pfad der Statusdatei, falls eine geschrieben wird. Der Laufbestand liegt daneben.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+
     pub fn set_state(&mut self, state: &str) {
         self.status.state = state.to_string();
     }
@@ -157,6 +162,16 @@ impl StatusWriter {
             close: candle.close,
             volume: candle.volume,
         });
+    }
+
+    /// Setzt die Nettoposition auf den Wert der BOERSE.
+    ///
+    /// Der eigene Zaehler in [`Self::record_order`] ist nur die Zwischenanzeige
+    /// zwischen Auftrag und naechster Kerze: eine Position kann auch ohne diesen
+    /// Lauf entstehen oder vergehen (Handschluss, Stop, zweiter Prozess). Die
+    /// Boerse ist die Wahrheit, der Zaehler die Schaetzung.
+    pub fn set_net_quantity(&mut self, quantity: f64) {
+        self.status.net_quantity = quantity;
     }
 
     pub fn record_order(

@@ -1,0 +1,27 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main", "hermes/okx-reconnect-20261021", "hermes/ci-C9-20261109" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+        persist-credentials: false
+    - name: Build
+      run: cargo build --locked --verbose
+    - name: Run tests
+      run: cargo test --locked --verbose
